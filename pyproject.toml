@@ -1,0 +1,14 @@
+[project]
+name = "pgforward"
+version = "0.0.0"
+description = "Postgres migrations in plain SQL files, forward only, built for coding agents."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary]>=3.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
