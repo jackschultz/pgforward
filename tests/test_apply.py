@@ -162,6 +162,24 @@ def test_a_lock_timeout_is_retried_and_succeeds_once_the_lock_is_free(db, app):
     assert any(line.startswith("retry") for line in said)
 
 
+def test_a_lock_timeout_says_the_file_is_not_at_fault(db, app):
+    query(db, CHECKS)
+    app.add(
+        "20260101000000_alter.sql",
+        "-- pgforward: lock-timeout=100ms\n"
+        "ALTER TABLE checks ADD COLUMN paused boolean;",
+    )
+    holder = psycopg.connect(db)
+    holder.execute("LOCK TABLE checks IN ACCESS EXCLUSIVE MODE")
+    try:
+        with pytest.raises(pgforward.MigrationFailed) as failed:
+            pgforward.migrate(db, [app.name])
+    finally:
+        holder.close()
+
+    assert "nothing in it is wrong" in failed.value.fix
+
+
 def test_a_second_run_waits_for_the_lock_and_names_its_holder(db, app):
     app.add("20260101000000_checks.sql", CHECKS)
     # A lock_timeout on the waiting run, so a lock that blocks instead of

@@ -277,6 +277,13 @@ def _failed(
             f"could not get a lock within lock_timeout ({settings['lock-timeout']}): "
             "a running query or open transaction holds the table"
         )
+    if migration.transaction and isinstance(problem, psycopg.errors.LockNotAvailable):
+        return MigrationFailed(
+            f"{where}: {message}",
+            "nothing from this file was applied, and nothing in it is wrong: wait "
+            "for the query or transaction holding the table to finish "
+            "(pg_stat_activity shows it), then run `pgforward migrate` again",
+        )
     if migration.transaction:
         return MigrationFailed(
             f"{where}: {message}",

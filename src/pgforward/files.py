@@ -51,18 +51,12 @@ def find(packages: Sequence[str]) -> list[Migration]:
 
 
 def folder(package: str) -> Traversable:
-    try:
-        root = importlib.resources.files(package)
-    except ModuleNotFoundError:
-        raise ConfigError(
-            f"package {package!r} is not importable",
-            "check [tool.pgforward] packages in pyproject.toml, then `uv sync`",
-        ) from None
-    migrations = root / "migrations"
+    migrations = _root(package) / "migrations"
     if not migrations.is_dir():
         raise ConfigError(
             f"package {package!r} has no migrations/ folder ({migrations})",
-            f"create it: the app's migrations live in src/{package}/migrations/",
+            f"create it, or run `pgforward new <description>`, which does: the "
+            f"app's migrations live in src/{package}/migrations/",
         )
     return migrations
 
@@ -74,12 +68,13 @@ def new(package: str, description: str, now: dt.datetime | None = None) -> pathl
             f"{description!r} has no letters or digits to name a file with",
             "pgforward new add_last_ping_at",
         )
-    target = pathlib.Path(str(folder(package)))
+    target = pathlib.Path(str(_root(package))) / "migrations"
     if "site-packages" in target.parts:
         raise ConfigError(
             f"{package} is installed into site-packages, not from source ({target})",
             "run `pgforward new` from the project's own checkout after `uv sync`",
         )
+    target.mkdir(exist_ok=True)
     moment = now or dt.datetime.now(dt.UTC)
     taken = {p.name[:14] for p in target.glob("*.sql")}
     while (stamp := moment.strftime("%Y%m%d%H%M%S")) in taken:
@@ -87,6 +82,16 @@ def new(package: str, description: str, now: dt.datetime | None = None) -> pathl
     path = target / f"{stamp}_{slug}.sql"
     path.write_text("")
     return path
+
+
+def _root(package: str) -> Traversable:
+    try:
+        return importlib.resources.files(package)
+    except ModuleNotFoundError:
+        raise ConfigError(
+            f"package {package!r} is not importable",
+            "check [tool.pgforward] packages in pyproject.toml, then `uv sync`",
+        ) from None
 
 
 def _package_files(package: str) -> list[Migration]:

@@ -42,8 +42,11 @@ a bug in pgforward, with its traceback.
 ## Writing a migration
 
 One file per change, named `YYYYMMDDHHMMSS_description.sql`, lowercase;
-`pgforward new` creates it empty, and a file with no SQL in it is an error
-until you write it. Files run in name order across all packages. Each
+`pgforward new` creates it empty (and the `migrations/` folder, the first
+time), and a file with no SQL in it is an error until you write it. To place
+a file between two others, as a teammate's older one would sit, name it by
+hand with a timestamp between theirs. `status` shows counts;
+`status --json` lists every applied file. Files run in name order across all packages. Each
 file runs in its own transaction with its ledger row, so a file that fails
 leaves nothing behind: fix it and run `migrate` again. Do not write BEGIN,
 COMMIT or ROLLBACK in a file: pgforward refuses them, since they would end
@@ -140,7 +143,8 @@ as the server, and a role that may create databases.
 
 `prepare` refuses unless the database's name ends in `_test`, it is not the
 database `DATABASE_URL` names (asked of the server, so two spellings of one
-address are caught), and it is marked test (an unmarked one is marked test).
+address are caught; with `DATABASE_URL` unset, only the name and the mark
+protect you), and it is marked test (an unmarked one is marked test).
 It migrates the database, and rebuilds it first when an applied file changed
 or a file would run out of order. Two test runs at once never check or
 rebuild it at the same moment, but a rebuild still ends the other run's open

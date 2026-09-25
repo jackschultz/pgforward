@@ -69,15 +69,15 @@ def test_new_names_the_file_and_never_reuses_a_timestamp(app):
 
 
 def test_new_refuses_to_write_into_an_installed_package(app, monkeypatch, tmp_path):
-    installed = tmp_path / "lib" / "site-packages" / app.name / "migrations"
-    installed.mkdir(parents=True)
-    monkeypatch.setattr(files, "folder", lambda package: installed)
+    installed = tmp_path / "lib" / "site-packages" / app.name
+    (installed / "migrations").mkdir(parents=True)
+    monkeypatch.setattr(files, "_root", lambda package: installed)
 
     with pytest.raises(pgforward.ConfigError) as refused:
         files.new(app.name, "add paused")
 
     assert "site-packages" in refused.value.message
-    assert list(installed.iterdir()) == []
+    assert list((installed / "migrations").iterdir()) == []
 
 
 @pytest.mark.parametrize("text", ["", "\n  \n", "-- to do\n"])
@@ -156,3 +156,13 @@ def test_a_file_that_is_not_utf8_is_an_error_naming_it(app):
     with pytest.raises(pgforward.ConfigError) as refused:
         files.find([app.name])
     assert "20260101000000_x.sql is not UTF-8" in refused.value.message
+
+
+def test_new_creates_the_migrations_folder_it_writes_into(make_package):
+    package = make_package()
+    package.folder.rmdir()
+
+    path = files.new(package.name, "create checks")
+
+    assert path.parent == package.folder
+    assert path.exists()
