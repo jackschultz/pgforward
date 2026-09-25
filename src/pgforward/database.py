@@ -30,6 +30,7 @@ Kind = Literal["test", "branch", "standing", "production"]
 KINDS: tuple[Kind, ...] = ("test", "branch", "standing", "production")
 DISPOSABLE: tuple[Kind, ...] = ("test", "branch")
 APPLICATION = "pgforward"
+REBUILD_WAIT_SECONDS = 60
 
 
 @dataclasses.dataclass(frozen=True)
@@ -146,6 +147,11 @@ def recreate(url: str) -> Target:
             f"{current.describe()} is not disposable; rebuild drops the whole database",
             "a database only this checkout uses can be marked: pgforward mark branch",
         )
+    with connect(url) as conn:
+        # Proves the role may mark the database before anything is dropped:
+        # a rebuild that could not mark it again would leave it unmarked,
+        # which reads as standing.
+        _set_kind(conn, current.name, current.kind)
     with _maintenance(url) as admin:
         _drop(admin, current.name)
         admin.execute(
@@ -157,23 +163,25 @@ def recreate(url: str) -> Target:
 
 
 @contextlib.contextmanager
-def serialized(url: str, name: str, wait: float = 60) -> Iterator[None]:
+def serialized(url: str, name: str) -> Iterator[None]:
     """Hold a lock named for this database while dropping and rebuilding it,
     so another run waits instead of dropping it underneath."""
     key = f"pgforward:{name}"
     with _maintenance(url) as admin:
-        deadline = time.monotonic() + wait
+        deadline = time.monotonic() + REBUILD_WAIT_SECONDS
         while not one(admin, queries.TRY_DATABASE_LOCK, (key,))[0]:
             if time.monotonic() >= deadline:
                 raise LockTimeout(
-                    f"another run has been rebuilding {name} for over {wait:.0f} s",
+                    f"another run has been preparing or rebuilding {name} for "
+                    f"over {REBUILD_WAIT_SECONDS} s",
                     "wait for it to finish, then run again",
                 )
             time.sleep(0.5)
         try:
             yield
         finally:
-            admin.execute(queries.DATABASE_UNLOCK, (key,))
+            if not admin.closed:
+                admin.execute(queries.DATABASE_UNLOCK, (key,))
 
 
 @contextlib.contextmanager
@@ -204,8 +212,9 @@ def _maintenance(url: str) -> Iterator[psycopg.Connection]:
             yield admin
     except psycopg.errors.InsufficientPrivilege as problem:
         raise Refused(
-            f"the role cannot create or drop databases: {problem}".strip(),
-            "locally, give the role CREATEDB (ALTER ROLE <role> CREATEDB)",
+            f"refused on the server's postgres database: {str(problem).strip()}",
+            "creating or dropping a database needs CREATEDB (ALTER ROLE <role> "
+            "CREATEDB) and CONNECT on postgres",
         ) from None
 
 
@@ -216,8 +225,17 @@ def _drop(admin: psycopg.Connection, name: str) -> None:
 
 
 def _set_kind(conn: psycopg.Connection, name: str, kind: Kind) -> None:
-    conn.execute(
-        sql.SQL("ALTER DATABASE {} SET pgforward.kind = {}").format(
-            sql.Identifier(name), sql.Literal(kind)
+    try:
+        conn.execute(
+            sql.SQL("ALTER DATABASE {} SET pgforward.kind = {}").format(
+                sql.Identifier(name), sql.Literal(kind)
+            )
         )
-    )
+    except psycopg.errors.InsufficientPrivilege as problem:
+        role = one(conn, "SELECT current_user")[0]
+        raise Refused(
+            f"the role {role} may not mark {name}: {str(problem).strip()}",
+            "a superuser allows it once (Postgres 15+): "
+            f"GRANT SET ON PARAMETER pgforward.kind TO {role}; and the role "
+            "must own the database",
+        ) from None

@@ -316,3 +316,85 @@ def test_prepare_waits_while_another_run_rebuilds_the_test_database(
         waiting.join(timeout=10)
 
     assert done == [["20260101000000_checks.sql"]]
+
+
+def test_a_test_database_from_another_branch_is_rebuilt_not_called_ahead(
+    make_database, app
+):
+    url = make_database("_test")
+    app.add("20260101000000_checks.sql", CHECKS)
+    feature = app.add("20260102000000_feature.sql", "ALTER TABLE checks ADD f int;")
+    testing.prepare(url, [app.name])
+    feature.unlink()  # back on main
+
+    assert testing.prepare(url, [app.name]) == ["20260101000000_checks.sql"]
+
+
+def test_a_branch_database_from_another_branch_is_a_problem_rebuild_fixes(
+    branch_db, app
+):
+    app.add("20260101000000_checks.sql", CHECKS)
+    feature = app.add("20260102000000_feature.sql", "ALTER TABLE checks ADD f int;")
+    pgforward.migrate(branch_db, [app.name])
+    feature.unlink()
+
+    current = pgforward.status(branch_db, [app.name])
+    assert current.ahead == []
+    assert [p.kind for p in current.problems] == ["missing"]
+    with pytest.raises(pgforward.LedgerMismatch) as refused:
+        pgforward.migrate(branch_db, [app.name])
+    assert "pgforward rebuild" in refused.value.fix
+
+
+def test_ahead_follows_the_order_files_ran_not_their_names(db, app, make_package):
+    library = make_package()
+    library.add("20260401000000_lib.sql", "CREATE TABLE lib (x int);")
+    app.add("20260101000000_checks.sql", CHECKS)
+    pgforward.migrate(db, [app.name, library.name])
+    newer_release = app.add("20260301000000_newer.sql", "ALTER TABLE checks ADD n int;")
+    pgforward.migrate(db, [app.name, library.name])
+    newer_release.unlink()  # an instance still on the older release
+
+    assert pgforward.pending(db, [app.name, library.name]) == []
+    assert pgforward.status(db, [app.name, library.name]).ahead == [
+        "20260301000000_newer.sql"
+    ]
+
+
+def test_a_database_with_none_of_the_codes_files_is_not_ahead(db, app):
+    path = app.add("20260101000000_checks.sql", CHECKS)
+    pgforward.migrate(db, [app.name])
+    path.unlink()
+
+    with pytest.raises(pgforward.LedgerMismatch):
+        pgforward.pending(db, [app.name])
+
+
+def test_a_role_that_may_not_mark_is_told_the_grant_and_nothing_is_dropped(
+    make_database, app, limited_role
+):
+    role, as_role = limited_role
+    url = make_database()
+    name = query(url, "SELECT current_database()")[0][0]
+    query(url, f'ALTER DATABASE {name} OWNER TO "{role}"')
+    query(url, f"ALTER DATABASE {name} SET pgforward.kind = 'branch'")
+    app.add("20260101000000_checks.sql", CHECKS)
+    pgforward.migrate(url, [app.name])
+
+    with pytest.raises(pgforward.Refused) as refused:
+        pgforward.rebuild(as_role(url), [app.name])
+
+    assert "GRANT SET ON PARAMETER pgforward.kind" in refused.value.fix
+    assert query(url, "SELECT to_regclass('checks')") == [("checks",)]
+    assert kind(url) == "branch"
+
+
+def test_a_role_that_cannot_read_the_ledger_is_told_the_grant(db, app, limited_role):
+    role, as_role = limited_role
+    app.add("20260101000000_checks.sql", CHECKS)
+    pgforward.migrate(db, [app.name])
+
+    with pytest.raises(pgforward.Refused) as refused:
+        pgforward.status(as_role(db), [app.name])
+
+    assert f"GRANT SELECT ON public.schema_migrations TO {role}" in refused.value.fix

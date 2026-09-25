@@ -18,10 +18,18 @@ SELECT current_database(),
 # The ledger lives in public, the one schema that exists before any migration
 # runs. Its first three columns are the ones every runner copied from Intake's
 # kept, so a project switching to pgforward keeps its ledger.
+# From the catalog, not information_schema, which hides the columns of a
+# table the role cannot read and would make the ledger look absent.
 LEDGER_COLUMNS = """
-SELECT column_name::text
-FROM information_schema.columns
-WHERE table_schema = 'public' AND table_name = 'schema_migrations'
+SELECT attname::text
+FROM pg_attribute
+WHERE attrelid = to_regclass('public.schema_migrations')
+  AND attnum > 0
+  AND NOT attisdropped
+"""
+
+LEDGER_READABLE = """
+SELECT has_table_privilege('public.schema_migrations', 'SELECT'), current_user
 """
 
 ENSURE_LEDGER = """

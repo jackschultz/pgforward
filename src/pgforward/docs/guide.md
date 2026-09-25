@@ -94,6 +94,9 @@ refuses when one disagrees with the database's own mark.
 - `production`: never rebuilt, and no scratch database is made on its server.
 
 A database marked standing or production is never made disposable by `mark`.
+Marking needs the role to own the database, and on Postgres 15+ a role that
+is not a superuser needs, once, from a superuser:
+`GRANT SET ON PARAMETER pgforward.kind TO <role>`.
 
 ## Changing a migration you already applied
 
@@ -139,8 +142,9 @@ as the server, and a role that may create databases.
 database `DATABASE_URL` names (asked of the server, so two spellings of one
 address are caught), and it is marked test (an unmarked one is marked test).
 It migrates the database, and rebuilds it first when an applied file changed
-or a file would run out of order. Two test runs at once wait for each other
-rather than drop the database under each other.
+or a file would run out of order. Two test runs at once never check or
+rebuild it at the same moment, but a rebuild still ends the other run's open
+connections: give runs in parallel a test database each.
 
 ## From the application
 
@@ -154,8 +158,11 @@ A health endpoint reports `pending(url)` and answers unhealthy while it is
 not empty. `pending` raises when an applied file changed, or went missing
 from among the files on disk. A database that has run a newer release's
 migrations (during a rolling deploy, while old instances still serve) is not
-an error: `status(url).ahead` names those files, and `migrate` from the older
-code refuses. `packages` defaults to pyproject.toml's list; pass it when the
+an error: `status(url).ahead` names those files (the ones applied after every
+file this code has), `status` still counts the database as current, and
+`migrate` from the older code refuses. On a test or branch database, files
+the checkout lacks (after switching branches) are a problem `rebuild` fixes,
+and `prepare` rebuilds by itself. `packages` defaults to pyproject.toml's list; pass it when the
 app runs where pyproject.toml is not.
 
 The role the application runs as needs `SELECT` on

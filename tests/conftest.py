@@ -115,3 +115,29 @@ def project(tmp_path, app, monkeypatch) -> pathlib.Path:
     )
     monkeypatch.chdir(tmp_path)
     return tmp_path
+
+
+@pytest.fixture
+def limited_role(server_url):
+    """A login role that is not a superuser, dropped afterwards. Returns a
+    function giving an address that connects as it."""
+    name = f"pft_role_{secrets.token_hex(4)}"
+    password = secrets.token_hex(12)
+    with psycopg.connect(server_url, autocommit=True) as conn:
+        conn.execute(
+            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                sql.Identifier(name), sql.Literal(password)
+            )
+        )
+    yield name, lambda url: make_conninfo(url, user=name, password=password)
+    with psycopg.connect(server_url, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT datname FROM pg_database WHERE datdba = %s::regrole", (name,)
+        ).fetchall()
+        for (database,) in rows:
+            conn.execute(
+                sql.SQL("ALTER DATABASE {} OWNER TO CURRENT_USER").format(
+                    sql.Identifier(database)
+                )
+            )
+        conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(name)))

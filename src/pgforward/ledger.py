@@ -7,7 +7,7 @@ from typing import Literal
 import psycopg
 
 from pgforward import database, files, queries
-from pgforward.errors import ConfigError, LedgerMismatch
+from pgforward.errors import ConfigError, LedgerMismatch, Refused
 
 
 @dataclasses.dataclass(frozen=True)
@@ -39,9 +39,12 @@ class Status:
     applied: list[Applied]
     pending: list[Pending]
     problems: list[Problem]
-    # Applied here, missing from disk, and newer than every file on disk: the
-    # database has run a newer release's migrations, as it does while old
-    # instances still serve during a rolling deploy. Not a problem for them.
+    # The files applied after every file this code has, and missing from
+    # disk: the database has run a newer release's migrations, as it does
+    # while old instances still serve during a rolling deploy. Not a problem
+    # for them. Only on a standing or production database: a test or branch
+    # database with files the checkout lacks (after a branch switch) is
+    # rebuilt instead.
     ahead: list[str] = dataclasses.field(default_factory=list)
 
     @property
@@ -53,6 +56,13 @@ def read(conn: psycopg.Connection) -> list[Applied]:
     columns = {row[0] for row in conn.execute(queries.LEDGER_COLUMNS)}
     if not columns:
         return []
+    readable, role = database.one(conn, queries.LEDGER_READABLE)
+    if not readable:
+        raise Refused(
+            f"the role {role} cannot read public.schema_migrations, so what is "
+            "applied cannot be known",
+            f"GRANT SELECT ON public.schema_migrations TO {role}",
+        )
     if "filename" not in columns:
         raise ConfigError(
             f"public.schema_migrations has columns {', '.join(sorted(columns))}; "
@@ -96,12 +106,14 @@ def compare(
 ) -> Status:
     on_disk = {m.filename: m for m in migrations}
     ran = {a.filename: a for a in applied}
-    newest_on_disk = max(on_disk, default="")
-    ahead = sorted(
-        a.filename
-        for a in applied
-        if a.filename not in on_disk and a.filename > newest_on_disk
-    )
+    ahead: list[str] = []
+    shares_history = any(a.filename in on_disk for a in applied)
+    if target.kind not in database.DISPOSABLE and shares_history:
+        for a in reversed(applied):  # the ledger's order: when each ran
+            if a.filename in on_disk:
+                break
+            ahead.append(a.filename)
+    ahead.sort()
     problems = [
         Problem("missing", a.filename)
         for a in applied

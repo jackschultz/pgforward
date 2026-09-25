@@ -157,7 +157,7 @@ def _status(args: argparse.Namespace) -> int:
     print(f"applied  {len(current.applied)}, pending {len(current.pending)}")
     on_disk = (
         {a.filename for a in current.applied}
-        - {p.filename for p in current.problems}
+        - {p.filename for p in current.problems if p.kind == "missing"}
         - set(current.ahead)
     )
     if on_disk:
