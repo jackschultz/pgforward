@@ -26,7 +26,7 @@ An empty or missing address is an error, never a fallback to another one.
 ## Commands
 
     pgforward new add_last_ping_at   create src/myapp/migrations/<timestamp>_add_last_ping_at.sql
-    pgforward migrate                apply what is pending
+    pgforward migrate                apply what is pending; on a branch database, rewrite schema.sql
     pgforward status                 applied and pending; exit 0 current, 1 pending, 2 problem
     pgforward rebuild                drop a test or branch database and apply every file
     pgforward mark branch            record the database's kind (test, branch, standing, production)
@@ -115,7 +115,10 @@ branch database, `pgforward rebuild` makes the two match.
 
 After `migrate` applies anything on a branch database, pgforward rewrites
 `schema.sql` beside pyproject.toml: the schema a fresh build of every file
-produces, built in a scratch database and dumped with `pg_dump`. Commit it;
+produces, dumped with `pg_dump`. The fresh build happens in a scratch
+database, `pgforward_scratch_<random>`, which pgforward creates on the same
+server and drops again, and says so in its output. `rebuild` and `schema` do
+the same; nothing else creates a database. Commit it;
 read it instead of replaying the migrations. It needs `pg_dump` at least as new
 as the server, and a role that may create databases.
 

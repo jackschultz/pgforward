@@ -65,7 +65,7 @@ def migrate(
     result = apply.migrate(url, names, echo=echo)
     if result.applied and schema_file is not None and result.target.kind == "branch":
         try:
-            schema.write(url, names, schema_file)
+            schema.write(url, names, schema_file, echo)
         except SchemaDumpFailed as problem:
             raise SchemaDumpFailed(
                 f"{len(result.applied)} applied, but schema.sql was not written: "
@@ -124,11 +124,14 @@ def mark(url: str, kind: Kind) -> tuple[Target, Target]:
 
 
 def write_schema(
-    url: str, path: pathlib.Path, packages: Sequence[str] | None = None
+    url: str,
+    path: pathlib.Path,
+    packages: Sequence[str] | None = None,
+    echo: Echo | None = None,
 ) -> Target:
     """Write the schema a fresh build of every file produces, built in a
     scratch database on `url`'s server; returns that server's database."""
-    return schema.write(url, _packages(packages), path)
+    return schema.write(url, _packages(packages), path, echo)
 
 
 def _packages(packages: Sequence[str] | None) -> tuple[str, ...]:

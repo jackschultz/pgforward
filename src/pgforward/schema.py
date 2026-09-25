@@ -10,7 +10,9 @@ import pathlib
 import re
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+
+from psycopg.conninfo import conninfo_to_dict
 
 from pgforward import apply, database, queries
 from pgforward.errors import MigrationFailed, SchemaDumpFailed
@@ -32,16 +34,22 @@ NOISE = re.compile(
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z_0-9]*)?\$")
 
 
-def write(url: str, packages: Sequence[str], path: pathlib.Path) -> database.Target:
+def write(
+    url: str,
+    packages: Sequence[str],
+    path: pathlib.Path,
+    echo: Callable[[str], None] | None = None,
+) -> database.Target:
     pg_dump, target = _pg_dump(url)
     with database.scratch(url) as scratch:
+        name = conninfo_to_dict(scratch)["dbname"]
         try:
             apply.migrate(scratch, packages)
         except MigrationFailed as problem:
             raise SchemaDumpFailed(
-                "a fresh build of every migration fails, so schema.sql was not "
-                f"written: {problem.message}. New databases and tests will fail "
-                "the same way",
+                f"a fresh build of every migration fails (built in the scratch "
+                f"database {name}, now dropped): {problem.message}. New databases "
+                "and tests will fail the same way",
                 f"on a branch database, `pgforward rebuild` shows it here. "
                 f"{problem.fix}",
             ) from None
@@ -64,6 +72,11 @@ def write(url: str, packages: Sequence[str], path: pathlib.Path) -> database.Tar
             "fix what it names, then run `pgforward schema`",
         )
     path.write_text(normalize(dumped.stdout))
+    if echo:
+        echo(
+            f"scratch  built schema.sql in {name}, a database created on this "
+            "server for it and dropped again"
+        )
     return target
 
 

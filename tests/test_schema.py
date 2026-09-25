@@ -112,3 +112,15 @@ def test_a_fresh_build_that_fails_is_reported_as_that(branch_db, app, tmp_path):
     assert "a fresh build of every migration fails" in failed.value.message
     assert "20260102000000_b.sql" in failed.value.message
     assert "pgforward rebuild" in failed.value.fix
+
+
+def test_the_scratch_database_is_announced(branch_db, app, tmp_path):
+    app.add("20260101000000_checks.sql", CHECKS)
+    said: list[str] = []
+
+    pgforward.migrate(
+        branch_db, [app.name], schema_file=tmp_path / "schema.sql", echo=said.append
+    )
+
+    [line] = [x for x in said if x.startswith("scratch")]
+    assert "pgforward_scratch_" in line and "dropped" in line

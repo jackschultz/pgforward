@@ -216,8 +216,12 @@ def _mark(args: argparse.Namespace) -> int:
 
 def _schema(args: argparse.Namespace) -> int:
     project = config.project()
+    lines: list[str] = []
     target = pgforward.write_schema(
-        config.database_url(args.url), project.schema_file, project.packages
+        config.database_url(args.url),
+        project.schema_file,
+        project.packages,
+        echo=lines.append,
     )
     if args.json:
         _print_json(
@@ -229,6 +233,8 @@ def _schema(args: argparse.Namespace) -> int:
         )
     else:
         print(target.describe())
+        for line in lines:
+            print(line)
         print(f"wrote    {_relative(project.schema_file)}")
     return 0
 
