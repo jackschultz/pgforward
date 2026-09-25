@@ -35,7 +35,8 @@ An empty or missing address is an error, never a fallback to another one.
 
 Every command's first line names the database and its kind. Add `--json` for
 output with a stable shape (`"version": 1`). Exit code 2 means refused or
-failed; the message says why and the `fix:` line what to do.
+failed; the message says why and the `fix:` line what to do. Exit code 3 is
+a bug in pgforward, with its traceback.
 
 ## Writing a migration
 
@@ -43,7 +44,10 @@ One file per change, named `YYYYMMDDHHMMSS_description.sql`, lowercase;
 `pgforward new` creates it empty, and a file with no SQL in it is an error
 until you write it. Files run in name order across all packages. Each
 file runs in its own transaction with its ledger row, so a file that fails
-leaves nothing behind: fix it and run `migrate` again.
+leaves nothing behind: fix it and run `migrate` again. Do not write BEGIN,
+COMMIT or ROLLBACK in a file: pgforward refuses them, since they would end
+its transaction. Each file starts with default settings, so a `SET` in one
+file does not carry into the next.
 
 While migrating, `lock_timeout` is 5s (a file that times out waiting for a
 lock is retried, three tries in all) and `statement_timeout` is 1min. A file
@@ -58,16 +62,28 @@ A statement that cannot run in a transaction, such as
 `CREATE INDEX CONCURRENTLY`, goes in a file of its own with one statement:
 
     -- pgforward: no-transaction
-    CREATE INDEX CONCURRENTLY pings_check_received ON pings (check_id, received_at);
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS pings_check_received
+        ON pings (check_id, received_at);
 
-pgforward refuses a no-transaction file with more than one statement. If the
-index build fails, it names any invalid index left behind and the
-`DROP INDEX CONCURRENTLY` to run before trying again. An unknown or misplaced
-`-- pgforward:` line is an error, never ignored.
+A no-transaction file has no timeouts unless it sets them: a concurrent
+index build blocks no reads or writes, but it waits for every older
+transaction in the database, and a short `lock_timeout` would fail it
+whenever any query runs long.
+
+pgforward refuses a no-transaction file with more than one statement, and
+refuses to run one while the database holds an invalid index (one a failed
+concurrent build left half made, which `IF NOT EXISTS` would otherwise skip):
+it names the `DROP INDEX CONCURRENTLY` to run first. `IF NOT EXISTS` makes the
+file safe to run again when a run was stopped after the index was built but
+before it was recorded. An unknown or misplaced `-- pgforward:` line, a file
+named like a migration but not quite (`.SQL`), and a file with no SQL are
+errors, never skipped.
 
 ## The kind of database
 
-The kind is stored in the database itself (`pgforward mark <kind>`):
+The kind is stored in the database itself (`pgforward mark <kind>`). A
+session, role or server setting of `pgforward.kind` does not count; pgforward
+refuses when one disagrees with the database's own mark.
 
 - `test`: tests may empty it. Its name ends in `_test`.
 - `branch`: one checkout's development database. `rebuild` may drop it, and
@@ -124,7 +140,8 @@ file changed or a file would run out of order.
 
     import pgforward
     pgforward.pending(url)     # file names not yet applied; read-only
-    pgforward.migrate(url)     # what `pgforward migrate` does
+    pgforward.migrate(url)     # apply what is pending (schema.sql only when
+                               # given schema_file=, as the command does)
     pgforward.status(url)      # applied, pending, problems
 
 A health endpoint reports `pending(url)` and answers unhealthy while it is
@@ -147,5 +164,7 @@ timeout, are batched jobs, not migrations.
 
 `public.schema_migrations`: filename, checksum (SHA-256 of the file),
 applied_at, package, duration_ms, out_of_order, pgforward_version. A ledger
-with only the first three columns, as earlier runners wrote, is kept and
-extended by the next `migrate`.
+an earlier runner wrote is kept and extended by the next `migrate`; rows
+with no checksum get one from the files on disk, once, and it says so. A
+ledger whose columns have other names is refused, with the `ALTER TABLE` that
+renames them.

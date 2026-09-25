@@ -1,7 +1,8 @@
 import json
 
-from support import CHECKS
+from support import CHECKS, query
 
+import pgforward
 from pgforward import cli
 
 
@@ -100,3 +101,48 @@ def test_guide_prints(capsys):
     code, out, _ = run(capsys, "guide")
     assert code == 0
     assert out.startswith("# pgforward guide")
+
+
+def test_a_database_error_exits_2_not_1(project, app, db, capsys):
+    app.add("20260101000000_checks.sql", CHECKS)
+    query(
+        db,
+        "CREATE VIEW public.schema_migrations AS"
+        " SELECT 'x'::text AS filename, (1 / 0)::text AS checksum",
+    )
+
+    code, _, err = run(capsys, "status", "--url", db)
+
+    assert code == 2
+    assert "SQLSTATE 22012" in err
+
+
+def test_a_bug_exits_3_with_its_traceback(project, app, db, capsys, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(pgforward, "status", broken)
+
+    code, _, err = run(capsys, "status", "--url", db)
+
+    assert code == 3
+    assert "RuntimeError: a bug" in err
+
+
+def test_rebuild_names_the_database_before_anything_else(project, app, db, capsys):
+    app.add("20260101000000_checks.sql", CHECKS)
+
+    code, out, err = run(capsys, "rebuild", "--url", db)
+
+    assert code == 2
+    assert out.splitlines()[0].endswith("(unmarked, treated as standing)")
+    assert "drop" not in out
+
+
+def test_schema_names_its_database(project, app, db, capsys):
+    app.add("20260101000000_checks.sql", CHECKS)
+
+    code, out, _ = run(capsys, "schema", "--json", "--url", db)
+
+    assert code == 0
+    assert json.loads(out)["database"]["kind"] == "standing"

@@ -2,6 +2,7 @@
 
 import psycopg
 import pytest
+from psycopg.conninfo import make_conninfo
 from support import CHECKS, query
 
 import pgforward
@@ -191,3 +192,76 @@ def test_prepare_rebuilds_a_test_database_when_a_file_would_run_out_of_order(
         "SELECT column_name FROM information_schema.columns"
         " WHERE table_name = 'checks' ORDER BY ordinal_position",
     ) == [("id",), ("name",), ("paused",), ("later",)]
+
+
+def test_a_session_setting_cannot_stand_in_for_the_database_mark(db, app):
+    pgforward.mark(db, "production")
+    app.add("20260101000000_checks.sql", CHECKS)
+    pgforward.migrate(db, [app.name])
+    overridden = make_conninfo(db, options="-c pgforward.kind=branch")
+
+    with pytest.raises(pgforward.Refused) as refused:
+        pgforward.rebuild(overridden, [app.name])
+
+    assert "only the database's own mark counts" in refused.value.fix
+    assert kind(db) == "production"
+    assert query(db, "SELECT to_regclass('checks')") == [("checks",)]
+
+
+def test_a_filename_only_ledger_is_baselined_from_the_files(db, app):
+    app.add("20260101000000_checks.sql", CHECKS)
+    app.add("20260102000000_more.sql", "ALTER TABLE checks ADD COLUMN more int;")
+    query(db, CHECKS)
+    query(
+        db,
+        "CREATE TABLE public.schema_migrations (filename TEXT PRIMARY KEY,"
+        " applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+    )
+    query(
+        db,
+        "INSERT INTO public.schema_migrations (filename)"
+        " VALUES ('20260101000000_checks.sql')",
+    )
+    assert pgforward.pending(db, [app.name]) == ["20260102000000_more.sql"]
+    said: list[str] = []
+
+    result = pgforward.migrate(db, [app.name], echo=said.append)
+
+    assert [r.filename for r in result.applied] == ["20260102000000_more.sql"]
+    assert any(line.startswith("baseline") for line in said)
+    assert query(
+        db, "SELECT count(*) FROM public.schema_migrations WHERE checksum IS NULL"
+    ) == [(0,)]
+
+
+def test_a_ledger_with_other_column_names_is_refused_before_it_is_altered(db, app):
+    app.add("20260101000000_checks.sql", CHECKS)
+    query(
+        db,
+        "CREATE TABLE public.schema_migrations (name TEXT PRIMARY KEY,"
+        " sha256 TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+    )
+
+    with pytest.raises(pgforward.ConfigError) as refused:
+        pgforward.migrate(db, [app.name])
+
+    assert "RENAME COLUMN name TO filename" in refused.value.fix
+    assert "RENAME COLUMN sha256 TO checksum" in refused.value.fix
+    assert query(
+        db,
+        "SELECT count(*) FROM information_schema.columns"
+        " WHERE table_name = 'schema_migrations'",
+    ) == [(3,)]
+    with pytest.raises(pgforward.ConfigError):
+        pgforward.status(db, [app.name])
+
+
+def test_a_null_checksum_is_unrecorded_not_changed(db, app):
+    app.add("20260101000000_checks.sql", CHECKS)
+    pgforward.migrate(db, [app.name])
+    query(
+        db, "ALTER TABLE public.schema_migrations ALTER COLUMN checksum DROP NOT NULL"
+    )
+    query(db, "UPDATE public.schema_migrations SET checksum = NULL")
+
+    assert pgforward.status(db, [app.name]).problems == []

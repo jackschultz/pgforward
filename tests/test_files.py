@@ -86,3 +86,73 @@ def test_a_file_with_no_sql_is_an_error(app, text):
     with pytest.raises(pgforward.ConfigError) as refused:
         files.find([app.name])
     assert "holds no SQL" in refused.value.message
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "CREATE TABLE a (id int);\nCOMMIT;\nCREATE TABLE b (id int);",
+        "BEGIN;\nCREATE TABLE a (id int);\nCOMMIT;",
+        "CREATE TABLE a (id int);\nROLLBACK;",
+        "START TRANSACTION;\nCREATE TABLE a (id int);\nEND;",
+    ],
+)
+def test_transaction_commands_in_a_file_are_refused_before_it_runs(app, text):
+    app.add("20260101000000_x.sql", text)
+    with pytest.raises(pgforward.ConfigError) as refused:
+        files.find([app.name])
+    assert "would end the transaction" in refused.value.message
+
+
+def test_bodies_savepoints_and_quoted_text_are_not_transaction_commands(app):
+    app.add(
+        "20260101000000_x.sql",
+        """
+CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $body$
+BEGIN
+  NEW.at := now();
+  RETURN NEW;
+END;
+$body$;
+CREATE FUNCTION two() RETURNS int LANGUAGE sql
+BEGIN ATOMIC
+  SELECT CASE WHEN true THEN 2 END;
+END;
+SAVEPOINT here;
+ROLLBACK TO SAVEPOINT here;
+COMMENT ON FUNCTION two() IS 'COMMIT; and '' BEGIN';
+/* COMMIT; /* nested */ ROLLBACK; */
+-- COMMIT;
+""",
+    )
+    [migration] = files.find([app.name])
+    assert migration.transaction is True
+
+
+def test_a_file_that_looks_like_a_migration_but_is_misnamed_is_an_error(app):
+    app.add("20260101000000_x.SQL", "SELECT 1;")
+    with pytest.raises(pgforward.ConfigError):
+        files.find([app.name])
+
+
+def test_other_files_in_the_folder_are_left_alone(app):
+    app.add("README.md", "notes")
+    app.add("20260101000000_x.sql", "SELECT 1;")
+    assert [m.filename for m in files.find([app.name])] == ["20260101000000_x.sql"]
+
+
+def test_a_directive_after_a_byte_order_mark_is_read(app):
+    path = app.folder / "20260101000000_x.sql"
+    path.write_bytes(
+        b"\xef\xbb\xbf-- pgforward: no-transaction\n"
+        b"CREATE INDEX CONCURRENTLY x ON t (y);\n"
+    )
+    [migration] = files.find([app.name])
+    assert migration.transaction is False
+
+
+def test_a_file_that_is_not_utf8_is_an_error_naming_it(app):
+    (app.folder / "20260101000000_x.sql").write_bytes(b"SELECT 'caf\xe9';")
+    with pytest.raises(pgforward.ConfigError) as refused:
+        files.find([app.name])
+    assert "20260101000000_x.sql is not UTF-8" in refused.value.message

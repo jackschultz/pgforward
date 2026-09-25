@@ -1,7 +1,8 @@
 """The `pgforward` command. Parses, calls the library, renders; no SQL here.
 
 Exit codes: 0 done or current, 1 migrations pending (`status`), 2 refused or
-failed. `--json` output carries "version": 1 and keeps its shape.
+failed, 3 a bug in pgforward (with its traceback). `--json` output carries
+"version": 1 and keeps its shape.
 """
 
 import argparse
@@ -12,6 +13,7 @@ import json
 import os
 import pathlib
 import sys
+import traceback
 from collections.abc import Sequence
 from typing import Any
 
@@ -33,13 +35,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         return args.run(args)
     except PgforwardError as problem:
         return _error(args, problem.code, problem.message, problem.fix)
-    except psycopg.OperationalError as problem:
+    except psycopg.Error as problem:
+        if problem.sqlstate is None:
+            return _error(
+                args,
+                "connect",
+                f"cannot connect: {str(problem).strip()}",
+                "check the address, and that Postgres is running",
+            )
         return _error(
             args,
-            "connect",
-            f"cannot connect: {str(problem).strip()}",
-            "check the address, and that Postgres is running",
+            "database",
+            f"the database refused: {problem.diag.message_primary} "
+            f"(SQLSTATE {problem.sqlstate})",
+            "",
         )
+    except Exception:
+        # A bug in pgforward, not an answer: never exit 1, which means pending.
+        traceback.print_exc()
+        return 3
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -142,8 +156,6 @@ def _migrate(args: argparse.Namespace) -> int:
 def _rebuild(args: argparse.Namespace) -> int:
     project = config.project()
     url = config.database_url(args.url)
-    if not args.json:
-        print("dropping and recreating the database, then applying every file")
     result = pgforward.rebuild(
         url,
         project.packages,
@@ -204,12 +216,19 @@ def _mark(args: argparse.Namespace) -> int:
 
 def _schema(args: argparse.Namespace) -> int:
     project = config.project()
-    pgforward.write_schema(
+    target = pgforward.write_schema(
         config.database_url(args.url), project.schema_file, project.packages
     )
     if args.json:
-        _print_json({"command": "schema", "schema_file": str(project.schema_file)})
+        _print_json(
+            {
+                "command": "schema",
+                "database": target.as_json(),
+                "schema_file": str(project.schema_file),
+            }
+        )
     else:
+        print(target.describe())
         print(f"wrote    {_relative(project.schema_file)}")
     return 0
 

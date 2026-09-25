@@ -3,6 +3,7 @@ import time
 
 import psycopg
 import pytest
+from psycopg.conninfo import make_conninfo
 from support import CHECKS, query
 
 import pgforward
@@ -80,11 +81,12 @@ def test_a_no_transaction_file_with_two_statements_is_refused(db, app):
         "CREATE INDEX CONCURRENTLY checks_name_lower ON checks (lower(name));\n",
     )
 
-    with pytest.raises(pgforward.MigrationFailed) as failed:
+    with pytest.raises(pgforward.ConfigError) as refused:
         pgforward.migrate(db, [app.name])
 
-    assert "exactly one statement" in failed.value.message
-    assert query(db, "SELECT count(*) FROM public.schema_migrations") == [(1,)]
+    assert "exactly one statement" in refused.value.message
+    assert "lines 2, 3" in refused.value.message
+    assert query(db, "SELECT to_regclass('public.schema_migrations')") == [(None,)]
 
 
 def test_a_failed_concurrent_index_names_the_invalid_index_to_drop(db, app):
@@ -162,10 +164,13 @@ def test_a_lock_timeout_is_retried_and_succeeds_once_the_lock_is_free(db, app):
 
 def test_a_second_run_waits_for_the_lock_and_names_its_holder(db, app):
     app.add("20260101000000_checks.sql", CHECKS)
+    # A lock_timeout on the waiting run, so a lock that blocks instead of
+    # polling fails this test rather than hanging it.
+    waiting = make_conninfo(db, options="-c lock_timeout=3s")
     with psycopg.connect(db, autocommit=True, application_name="deploy") as holder:
         holder.execute(queries.TRY_LOCK, (queries.LOCK_KEY,))
         with pytest.raises(pgforward.LockTimeout) as waited:
-            pgforward.apply.migrate(db, [app.name], lock_wait=1)
+            pgforward.apply.migrate(waiting, [app.name], lock_wait=1)
 
     assert "deploy" in waited.value.message
     assert query(db, "SELECT to_regclass('checks')") == [(None,)]
@@ -260,3 +265,150 @@ def test_a_file_and_its_ledger_row_commit_together(db, app, monkeypatch):
         pgforward.migrate(db, [app.name])
 
     assert query(db, "SELECT to_regclass('checks')") == [(None,)]
+
+
+def _snapshot_holder(url: str, seconds: float) -> psycopg.Connection:
+    """A session holding a snapshot, which CREATE INDEX CONCURRENTLY waits
+    out, released after `seconds`."""
+    holder = psycopg.connect(url)
+    holder.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+    holder.execute("SELECT 1")
+    threading.Timer(seconds, holder.rollback).start()
+    return holder
+
+
+def test_a_timed_out_concurrent_build_names_its_invalid_index_and_blocks_rerun(db, app):
+    query(db, "CREATE TABLE t (y int)")
+    path = app.add(
+        "20260101000000_index.sql",
+        "-- pgforward: no-transaction\n"
+        "-- pgforward: statement-timeout=300ms\n"
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS t_y ON t (y);\n",
+    )
+    holder = _snapshot_holder(db, 2)
+    try:
+        with pytest.raises(pgforward.MigrationFailed) as failed:
+            pgforward.migrate(db, [app.name])
+    finally:
+        time.sleep(2.2)
+        holder.close()
+    assert "DROP INDEX CONCURRENTLY t_y" in failed.value.fix
+
+    path.write_text(path.read_text().replace("300ms", "10min"))
+    with pytest.raises(pgforward.MigrationFailed) as refused:
+        pgforward.migrate(db, [app.name])
+
+    assert "before it could run" in refused.value.message
+    assert pgforward.pending(db, [app.name]) == ["20260101000000_index.sql"]
+
+
+def test_a_concurrent_build_waits_out_long_queries_by_default(db, app, monkeypatch):
+    monkeypatch.setitem(pgforward.apply.DEFAULTS, "lock-timeout", "100ms")
+    query(db, "CREATE TABLE t (y int)")
+    app.add(
+        "20260101000000_index.sql",
+        "-- pgforward: no-transaction\nCREATE INDEX CONCURRENTLY t_y ON t (y);\n",
+    )
+    holder = _snapshot_holder(db, 0.7)
+    try:
+        result = pgforward.migrate(db, [app.name])
+    finally:
+        holder.close()
+
+    assert [r.filename for r in result.applied] == ["20260101000000_index.sql"]
+
+
+def test_a_statement_already_run_but_not_recorded_says_how_to_record_it(db, app):
+    query(db, "CREATE TABLE t (y int)")
+    query(db, "CREATE INDEX t_y ON t (y)")
+    app.add(
+        "20260101000000_index.sql",
+        "-- pgforward: no-transaction\nCREATE INDEX CONCURRENTLY t_y ON t (y);\n",
+    )
+
+    with pytest.raises(pgforward.MigrationFailed) as failed:
+        pgforward.migrate(db, [app.name])
+
+    assert "INSERT INTO public.schema_migrations" in failed.value.fix
+    assert "20260101000000_index.sql" in failed.value.fix
+
+
+def test_a_set_in_one_file_does_not_carry_into_the_next(db, app):
+    app.add(
+        "20260101000000_app.sql",
+        "CREATE SCHEMA app; SET search_path = app; CREATE TABLE one (x int);",
+    )
+    app.add("20260102000000_two.sql", "CREATE TABLE two (x int);")
+
+    pgforward.migrate(db, [app.name])
+
+    assert query(db, "SELECT to_regclass('public.two')") == [("two",)]
+
+
+def test_a_file_that_ends_the_transaction_itself_is_caught_while_running(
+    db, app, monkeypatch
+):
+    """The scanner refuses COMMIT in a file before anything runs; this is the
+    check behind it, for a form the scanner misses."""
+    monkeypatch.setattr(
+        pgforward.statements, "transaction_control", lambda statement: False
+    )
+    app.add("20260101000000_commits.sql", "CREATE TABLE a (id int); COMMIT;")
+
+    with pytest.raises(pgforward.MigrationFailed) as failed:
+        pgforward.migrate(db, [app.name])
+
+    assert "ended pgforward's transaction" in failed.value.message
+
+
+def test_the_lock_holder_named_is_on_this_database(db, make_database, app):
+    other = make_database()
+    app.add("20260101000000_checks.sql", CHECKS)
+    with (
+        psycopg.connect(other, autocommit=True, application_name="elsewhere") as a,
+        psycopg.connect(db, autocommit=True, application_name="real-holder") as b,
+    ):
+        a.execute(queries.TRY_LOCK, (queries.LOCK_KEY,))
+        b.execute(queries.TRY_LOCK, (queries.LOCK_KEY,))
+        with pytest.raises(pgforward.LockTimeout) as waited:
+            pgforward.apply.migrate(db, [app.name], lock_wait=0.5)
+
+    assert "real-holder" in waited.value.message
+
+
+def test_a_lost_connection_names_the_file_that_was_running(db, app):
+    app.add("20260101000000_slow.sql", "SELECT pg_sleep(5);")
+
+    def kill() -> None:
+        query(
+            db,
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+            " WHERE application_name = 'pgforward' AND datname = current_database()"
+            " AND pid <> pg_backend_pid()",
+        )
+
+    threading.Timer(0.5, kill).start()
+    with pytest.raises(pgforward.MigrationFailed) as failed:
+        pgforward.migrate(db, [app.name])
+
+    assert "20260101000000_slow.sql" in failed.value.message
+    assert "connection was lost" in failed.value.message
+
+
+def test_a_cancel_is_not_called_a_statement_timeout(db, app):
+    app.add("20260101000000_slow.sql", "SELECT pg_sleep(5);")
+
+    def cancel() -> None:
+        query(
+            db,
+            "SELECT pg_cancel_backend(pid) FROM pg_stat_activity"
+            " WHERE application_name = 'pgforward' AND datname = current_database()"
+            " AND pid <> pg_backend_pid()",
+        )
+
+    threading.Timer(0.5, cancel).start()
+    with pytest.raises(pgforward.MigrationFailed) as failed:
+        pgforward.migrate(db, [app.name])
+
+    assert "statement timeout" not in failed.value.message
+    assert "canceling statement" in failed.value.message

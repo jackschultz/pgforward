@@ -85,9 +85,21 @@ def rebuild(
 ) -> Result:
     """Drop a test or branch database, create it empty, and apply every file."""
     names = _packages(packages)
+    say = echo or (lambda _: None)
     files.find(names)
-    database.recreate(url)
-    return migrate(url, names, schema_file=schema_file, echo=echo)
+    with database.connect(url) as conn:
+        say(database.target(conn).describe())
+    rebuilt = database.recreate(url)
+    say(f"rebuilt  {rebuilt.name}: dropped, created empty, still {rebuilt.kind}")
+    named = False
+
+    def without_the_name_again(line: str) -> None:
+        nonlocal named
+        if named:
+            say(line)
+        named = True
+
+    return migrate(url, names, schema_file=schema_file, echo=without_the_name_again)
 
 
 def status(url: str, packages: Sequence[str] | None = None) -> Status:
@@ -113,10 +125,10 @@ def mark(url: str, kind: Kind) -> tuple[Target, Target]:
 
 def write_schema(
     url: str, path: pathlib.Path, packages: Sequence[str] | None = None
-) -> None:
+) -> Target:
     """Write the schema a fresh build of every file produces, built in a
-    scratch database on `url`'s server."""
-    schema.write(url, _packages(packages), path)
+    scratch database on `url`'s server; returns that server's database."""
+    return schema.write(url, _packages(packages), path)
 
 
 def _packages(packages: Sequence[str] | None) -> tuple[str, ...]:

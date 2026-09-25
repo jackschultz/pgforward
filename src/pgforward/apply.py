@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable, Sequence
 
 import psycopg
+from psycopg.pq import TransactionStatus
 
 from pgforward import database, files, ledger, queries
 from pgforward.errors import LockTimeout, MigrationFailed
@@ -21,6 +22,12 @@ from pgforward.errors import LockTimeout, MigrationFailed
 LOCK_WAIT_SECONDS = 60
 POLL_SECONDS = 0.5
 DEFAULTS = {"lock-timeout": "5s", "statement-timeout": "1min"}
+# A no-transaction file is for statements like CREATE INDEX CONCURRENTLY that
+# block no reads or writes while they run, but wait for every older
+# transaction in the database, which lock_timeout also bounds. A 5 s limit
+# there fails the build whenever any query runs long, and leaves an invalid
+# index behind; the file sets its own limits when it wants them.
+NO_TRANSACTION_DEFAULTS = {"lock-timeout": "0", "statement-timeout": "0"}
 LOCK_ATTEMPTS = 3
 
 Echo = Callable[[str], None]
@@ -57,8 +64,10 @@ def migrate(
         say(target.describe())
         _lock(conn, lock_wait, say)
         try:
+            recorded = ledger.read(conn)
             with conn.transaction():
                 conn.execute(queries.ENSURE_LEDGER)
+            _baseline(conn, migrations, recorded, say)
             status = ledger.compare(target, migrations, ledger.read(conn))
             ledger.refuse(status)
             latest = max((a.filename for a in status.applied), default="")
@@ -67,8 +76,29 @@ def migrate(
                 applied.append(ran)
                 latest = max(latest, ran.filename)
         finally:
-            conn.execute(queries.UNLOCK, (queries.LOCK_KEY,))
+            if not conn.closed:
+                conn.execute(queries.UNLOCK, (queries.LOCK_KEY,))
     return Result(target, applied)
+
+
+def _baseline(
+    conn: psycopg.Connection,
+    migrations: Sequence[files.Migration],
+    recorded: Sequence[ledger.Applied],
+    say: Echo,
+) -> None:
+    on_disk = {m.filename: m for m in migrations}
+    unverified = [
+        a.filename for a in recorded if a.checksum is None and a.filename in on_disk
+    ]
+    with conn.transaction():
+        for filename in unverified:
+            conn.execute(queries.BASELINE, (on_disk[filename].checksum, filename))
+    if unverified:
+        say(
+            f"baseline {len(unverified)} applied files had no checksum; recorded "
+            "from the files on disk, which are trusted to be what ran"
+        )
 
 
 def _lock(conn: psycopg.Connection, wait: float, say: Echo) -> None:
@@ -102,21 +132,36 @@ def _run(
     conn: psycopg.Connection, pending: ledger.Pending, latest: str, say: Echo
 ) -> Ran:
     migration = pending.migration
-    settings = DEFAULTS | migration.settings
-    for name, value in settings.items():
-        conn.execute(queries.SET, (name.replace("-", "_"), value))
+    defaults = DEFAULTS if migration.transaction else NO_TRANSACTION_DEFAULTS
+    settings = defaults | migration.settings
     out_of_order = migration.filename < latest
+    if not migration.transaction:
+        _refuse_invalid_indexes(conn, migration)
     for attempt in range(1, LOCK_ATTEMPTS + 1):
+        # A SET in an earlier file would otherwise carry into this one, and
+        # the same files would build differently in one run than in several.
+        conn.execute("RESET ALL")
+        conn.execute("RESET ROLE")
+        for name, value in settings.items():
+            conn.execute(queries.SET, (name.replace("-", "_"), value))
         started = time.perf_counter()
         try:
             if migration.transaction:
                 with conn.transaction():
                     conn.execute(migration.text.encode())
+                    if conn.info.transaction_status != TransactionStatus.INTRANS:
+                        raise MigrationFailed(
+                            f"{_where(migration)} ended pgforward's transaction "
+                            "itself; part of it may be applied",
+                            "remove the COMMIT, ROLLBACK or BEGIN from it, and "
+                            "check what it left in the database",
+                        )
                     duration = _ms(started)
                     _record(conn, migration, duration, out_of_order)
             else:
                 conn.execute(migration.text.encode(), prepare=True)
                 duration = _ms(started)
+                _refuse_invalid_indexes(conn, migration, after=True)
                 _record(conn, migration, duration, out_of_order)
             break
         except psycopg.errors.LockNotAvailable as problem:
@@ -148,6 +193,23 @@ def _run(
     return ran
 
 
+def _refuse_invalid_indexes(
+    conn: psycopg.Connection, migration: files.Migration, after: bool = False
+) -> None:
+    """An invalid index is one a concurrent build left half made. Before a
+    no-transaction file runs, one already there could be skipped by its
+    IF NOT EXISTS and recorded as done; after, one it left means it failed."""
+    invalid = [row[0] for row in conn.execute(queries.INVALID_INDEXES)]
+    if not invalid:
+        return
+    when = "after it ran" if after else "before it could run"
+    raise MigrationFailed(
+        f"{_where(migration)}: invalid index {', '.join(invalid)} in the "
+        f"database {when}; a concurrent index build left it half made",
+        _drop_invalid(invalid),
+    )
+
+
 def _record(
     conn: psycopg.Connection,
     migration: files.Migration,
@@ -173,7 +235,18 @@ def _failed(
     problem: psycopg.Error,
     settings: dict[str, str],
 ) -> MigrationFailed:
-    where = f"{migration.package}/migrations/{migration.filename}"
+    where = _where(migration)
+    if conn.closed:
+        after = (
+            "it rolled back"
+            if migration.transaction
+            else "run `pgforward status`, and look for an invalid index it may "
+            "have left"
+        )
+        return MigrationFailed(
+            f"{where}: the connection was lost while it ran ({str(problem).strip()})",
+            f"nothing of it was recorded; {after}. Then run `pgforward migrate`",
+        )
     diag = problem.diag
     if diag.statement_position:
         line = migration.text.count("\n", 0, int(diag.statement_position) - 1) + 1
@@ -182,11 +255,21 @@ def _failed(
     extra = [part for part in (diag.message_detail, diag.message_hint) if part]
     if extra:
         message += f" ({'; '.join(extra)})"
-    if isinstance(problem, psycopg.errors.QueryCanceled):
+    invalid = (
+        []
+        if migration.transaction
+        else [row[0] for row in conn.execute(queries.INVALID_INDEXES)]
+    )
+    if isinstance(problem, psycopg.errors.QueryCanceled) and "timeout" in message:
+        fix = (
+            "if it needs longer, put `-- pgforward: statement-timeout=10min` at "
+            "the top of the file"
+        )
+        if invalid:
+            fix = f"{_drop_invalid(invalid)}; and {fix}"
         return MigrationFailed(
             f"{where}: hit the statement timeout ({settings['statement-timeout']})",
-            "if it needs longer, put `-- pgforward: statement-timeout=10min` at "
-            "the top of the file",
+            fix,
         )
     if isinstance(problem, psycopg.errors.LockNotAvailable):
         message = (
@@ -199,18 +282,31 @@ def _failed(
             "nothing from this file was applied; fix it and run "
             "`pgforward migrate` again",
         )
-    if "multiple commands" in message:
-        return MigrationFailed(
-            f"{where}: a `-- pgforward: no-transaction` file must hold exactly one "
-            "statement",
-            "split it: one file per statement that cannot run in a transaction",
-        )
-    invalid = [row[0] for row in conn.execute(queries.INVALID_INDEXES)]
-    fix = "fix it and run `pgforward migrate` again"
     if invalid:
-        drops = " ".join(f"DROP INDEX CONCURRENTLY {name};" for name in invalid)
-        fix = f"invalid indexes are left behind; drop them first: {drops} Then {fix}"
-    return MigrationFailed(f"{where}: {message}", fix)
+        return MigrationFailed(f"{where}: {message}", _drop_invalid(invalid))
+    if isinstance(
+        problem, psycopg.errors.DuplicateTable | psycopg.errors.DuplicateObject
+    ):
+        return MigrationFailed(
+            f"{where}: {message}",
+            "if this file made it, the statement already ran and was never "
+            "recorded (a run stopped between the two). Record it: "
+            "INSERT INTO public.schema_migrations (filename, checksum, package) "
+            f"VALUES ('{migration.filename}', '{migration.checksum}', "
+            f"'{migration.package}'); or write it with IF NOT EXISTS",
+        )
+    return MigrationFailed(
+        f"{where}: {message}", "fix it and run `pgforward migrate` again"
+    )
+
+
+def _drop_invalid(names: list[str]) -> str:
+    drops = " ".join(f"DROP INDEX CONCURRENTLY {name};" for name in names)
+    return f"drop it, then run `pgforward migrate` again: {drops}"
+
+
+def _where(migration: files.Migration) -> str:
+    return f"{migration.package}/migrations/{migration.filename}"
 
 
 def _line(ran: Ran) -> str:

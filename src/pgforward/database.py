@@ -61,7 +61,15 @@ def connect(url: str, **kwargs) -> psycopg.Connection:
 
 
 def target(conn: psycopg.Connection) -> Target:
-    name, marked = one(conn, queries.TARGET)
+    name, marked, session = one(conn, queries.TARGET)
+    if session is not None and session != marked:
+        raise Refused(
+            f"{name} is marked {marked or 'nothing'}, but this session sees "
+            f"pgforward.kind = {session!r}, set by a connection option, PGOPTIONS, "
+            "the role or the server",
+            "remove that setting; only the database's own mark counts "
+            "(pgforward mark <kind>)",
+        )
     if marked is not None and marked not in KINDS:
         raise Refused(
             f"{name} is marked with an unknown kind {marked!r}",

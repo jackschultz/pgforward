@@ -16,6 +16,7 @@ import re
 from collections.abc import Sequence
 from importlib.resources.abc import Traversable
 
+from pgforward import statements
 from pgforward.errors import ConfigError
 
 NAME = re.compile(r"^\d{14}_[a-z0-9_]+\.sql$")
@@ -91,25 +92,31 @@ def new(package: str, description: str, now: dt.datetime | None = None) -> pathl
 def _package_files(package: str) -> list[Migration]:
     migrations = []
     for entry in folder(package).iterdir():
-        if not entry.name.endswith(".sql"):
+        where = f"{package}/migrations/{entry.name}"
+        if ".sql" not in entry.name.lower():
             continue
         if not NAME.fullmatch(entry.name):
             raise ConfigError(
-                f"{package}/migrations/{entry.name}: a migration is named "
-                "YYYYMMDDHHMMSS_description.sql, lowercase",
-                "pgforward new <description> writes a correctly named file",
+                f"{where}: a migration is named YYYYMMDDHHMMSS_description.sql, "
+                "lowercase",
+                "pgforward new <description> writes a correctly named file; "
+                "rename or move this one",
             )
         data = entry.read_bytes()
-        text = data.decode()
-        if all(
-            not line.strip() or line.strip().startswith("--")
-            for line in text.splitlines()
-        ):
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError as problem:
             raise ConfigError(
-                f"{package}/migrations/{entry.name} holds no SQL",
-                "write the migration in it, or delete it",
+                f"{where} is not UTF-8 (byte {problem.start})",
+                "save it as UTF-8",
+            ) from None
+        found = statements.split(text)
+        if not found:
+            raise ConfigError(
+                f"{where} holds no SQL", "write the migration in it, or delete it"
             )
-        transaction, settings = _directives(f"{package}/migrations/{entry.name}", text)
+        transaction, settings = _directives(where, text)
+        _check_statements(where, found, transaction)
         migrations.append(
             Migration(
                 filename=entry.name,
@@ -156,3 +163,25 @@ def _directives(where: str, text: str) -> tuple[bool, dict[str, str]]:
                 "`-- pgforward: statement-timeout=10min` (0 turns a timeout off)",
             )
     return transaction, settings
+
+
+def _check_statements(
+    where: str, found: list[statements.Statement], transaction: bool
+) -> None:
+    if not transaction and len(found) > 1:
+        raise ConfigError(
+            f"{where}: a `-- pgforward: no-transaction` file must hold exactly one "
+            f"statement; this one holds {len(found)} (lines "
+            f"{', '.join(str(s.line) for s in found)})",
+            "split it: one file per statement that cannot run in a transaction",
+        )
+    for statement in found:
+        if transaction and statements.transaction_control(statement):
+            raise ConfigError(
+                f"{where} line {statement.line}: {' '.join(statement.words[:2])} "
+                "would end the transaction pgforward runs this file in, and "
+                "its ledger row with it",
+                "delete it: every file already runs in its own transaction. A "
+                "statement that cannot run in one goes in its own file marked "
+                "`-- pgforward: no-transaction`",
+            )

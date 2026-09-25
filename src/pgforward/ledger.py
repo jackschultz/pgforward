@@ -7,14 +7,14 @@ from typing import Literal
 import psycopg
 
 from pgforward import database, files, queries
-from pgforward.errors import LedgerMismatch
+from pgforward.errors import ConfigError, LedgerMismatch
 
 
 @dataclasses.dataclass(frozen=True)
 class Applied:
     filename: str
-    checksum: str
-    applied_at: str
+    checksum: str | None  # None: an earlier runner's row, not yet baselined
+    applied_at: str | None
     package: str | None
     duration_ms: int | None
     out_of_order: bool
@@ -46,20 +46,43 @@ class Status:
 
 
 def read(conn: psycopg.Connection) -> list[Applied]:
-    if not database.one(conn, queries.LEDGER_EXISTS)[0]:
+    columns = {row[0] for row in conn.execute(queries.LEDGER_COLUMNS)}
+    if not columns:
         return []
+    if "filename" not in columns:
+        raise ConfigError(
+            f"public.schema_migrations has columns {', '.join(sorted(columns))}; "
+            "pgforward reads a ledger with filename and checksum",
+            _conversion(columns),
+        )
     rows = [row[0] for row in conn.execute(queries.READ_LEDGER)]
     return [
         Applied(
             filename=row["filename"],
-            checksum=row["checksum"],
-            applied_at=row["applied_at"],
+            checksum=row.get("checksum"),
+            applied_at=row.get("applied_at"),
             package=row.get("package"),
             duration_ms=row.get("duration_ms"),
             out_of_order=bool(row.get("out_of_order")),
         )
         for row in rows
     ]
+
+
+def _conversion(columns: set[str]) -> str:
+    renames = []
+    for old, new in (("name", "filename"), ("sha256", "checksum")):
+        if old in columns and new not in columns:
+            renames.append(
+                f"ALTER TABLE public.schema_migrations RENAME COLUMN {old} TO {new};"
+            )
+    if renames:
+        return f"rename its columns, then run pgforward again: {' '.join(renames)}"
+    return (
+        "rename the column holding each file's name to filename "
+        "(ALTER TABLE public.schema_migrations RENAME COLUMN <column> TO filename), "
+        "then run pgforward again"
+    )
 
 
 def compare(
@@ -74,7 +97,9 @@ def compare(
     ] + [
         Problem("changed", a.filename)
         for a in applied
-        if a.filename in on_disk and on_disk[a.filename].checksum != a.checksum
+        if a.filename in on_disk
+        and a.checksum is not None
+        and on_disk[a.filename].checksum != a.checksum
     ]
     latest = max(ran, default="")
     pending = [

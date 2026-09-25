@@ -36,7 +36,17 @@ skipped file.
 
 ## Status
 
-The first version, in progress. Postgres 15+, Python 3.12+, psycopg 3.
+The first version, in progress. Postgres 15+ (tested on 18), Python 3.12+,
+psycopg 3.
+
+## Development
+
+    uv run pytest -q          # needs TEST_DATABASE_URL: a database ending _test
+    uv run ruff check . && uv run ruff format --check .
+    uv run ty check src
+
+The tests create and drop their own databases beside the test database, so
+the role needs CREATEDB.
 
 ## License
 

@@ -74,3 +74,41 @@ def test_a_missing_pg_dump_says_the_migrations_were_applied(
     assert failed.value.message.startswith("1 applied")
     assert "pg_dump" in failed.value.message
     assert query(branch_db, "SELECT count(*) FROM public.schema_migrations") == [(1,)]
+
+
+def test_function_bodies_come_through_schema_sql_whole(db, app, tmp_path):
+    app.add(
+        "20260101000000_touch.sql",
+        """CREATE TABLE a (x int, touched timestamptz);
+CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+UPDATE a
+SET touched = now()
+WHERE x = NEW.x;
+--
+RETURN NEW;
+END;
+$$;
+""",
+    )
+    target = tmp_path / "schema.sql"
+
+    pgforward.write_schema(db, target, [app.name])
+
+    text = target.read_text()
+    assert "UPDATE a\nSET touched = now()\nWHERE x = NEW.x;\n--\nRETURN NEW;" in text
+
+
+def test_a_fresh_build_that_fails_is_reported_as_that(branch_db, app, tmp_path):
+    app.add("20260101000000_a.sql", "CREATE TABLE a (x int);")
+    app.add("20260103000000_c.sql", "CREATE TABLE c (x int);")
+    pgforward.migrate(branch_db, [app.name])
+    app.add("20260102000000_b.sql", "ALTER TABLE c ADD COLUMN y int;")
+
+    with pytest.raises(pgforward.SchemaDumpFailed) as failed:
+        pgforward.migrate(branch_db, [app.name], schema_file=tmp_path / "schema.sql")
+
+    assert failed.value.message.startswith("1 applied")
+    assert "a fresh build of every migration fails" in failed.value.message
+    assert "20260102000000_b.sql" in failed.value.message
+    assert "pgforward rebuild" in failed.value.fix
