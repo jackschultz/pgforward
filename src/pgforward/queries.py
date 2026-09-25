@@ -60,6 +60,29 @@ INSERT INTO public.schema_migrations
 VALUES (%s, %s, %s, %s, %s, %s)
 """
 
+# Re-run files: which version of each last ran. Its own table, since a re-run
+# file runs many times and a migration once.
+RERUNS_EXIST = "SELECT to_regclass('public.schema_reruns') IS NOT NULL"
+
+ENSURE_RERUNS = """
+CREATE TABLE IF NOT EXISTS public.schema_reruns (
+    package    TEXT NOT NULL,
+    filename   TEXT NOT NULL,
+    checksum   TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (package, filename)
+)
+"""
+
+READ_RERUNS = "SELECT package, filename, checksum FROM public.schema_reruns"
+
+RECORD_RERUN = """
+INSERT INTO public.schema_reruns (package, filename, checksum)
+VALUES (%s, %s, %s)
+ON CONFLICT (package, filename)
+DO UPDATE SET checksum = EXCLUDED.checksum, applied_at = NOW()
+"""
+
 # One key for every pgforward run. It is also the key Intake's runner took, so
 # Intake cannot run both at once while it switches; the other runners used
 # other keys.
@@ -100,6 +123,37 @@ FROM pg_index i
 WHERE NOT i.indisvalid
 ORDER BY 1
 """
+
+# The application's tables: every table outside the system schemas except
+# pgforward's own two, with what a role may do on each.
+TABLE_PRIVILEGES = """
+SELECT format('%%I.%%I', n.nspname, c.relname),
+       has_table_privilege(%s, c.oid, 'SELECT'),
+       has_table_privilege(%s, c.oid, 'INSERT'),
+       has_table_privilege(%s, c.oid, 'UPDATE'),
+       has_table_privilege(%s, c.oid, 'DELETE')
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p', 'v', 'm')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg\\_%%'
+  AND (n.nspname, c.relname) NOT IN
+      (('public', 'schema_migrations'), ('public', 'schema_reruns'))
+ORDER BY 1
+"""
+
+SCHEMAS_WITHOUT_USAGE = """
+SELECT DISTINCT n.nspname::text
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p', 'v', 'm')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg\\_%%'
+  AND NOT has_schema_privilege(%s, n.oid, 'USAGE')
+ORDER BY 1
+"""
+
+ROLE_EXISTS = "SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = %s)"
 
 SERVER_VERSION = "SELECT current_setting('server_version_num')::int / 10000"
 

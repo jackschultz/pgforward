@@ -47,6 +47,19 @@ class Result:
     target: database.Target
     applied: list[Ran]
     schema_file: pathlib.Path | None = None
+    reruns: list[Ran] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass(frozen=True)
+class Step:
+    migration: files.Migration
+    settings: dict[str, str]
+
+
+@dataclasses.dataclass(frozen=True)
+class Plan:
+    target: database.Target
+    steps: list[Step]
 
 
 def migrate(
@@ -58,7 +71,9 @@ def migrate(
 ) -> Result:
     say = echo or (lambda _: None)
     migrations = files.find(packages)
+    reruns = files.reruns(packages)
     applied: list[Ran] = []
+    reran: list[Ran] = []
     with database.connect(url) as conn:
         target = database.target(conn)
         say(target.describe())
@@ -76,10 +91,55 @@ def migrate(
                 ran = _run(conn, pending, latest, say)
                 applied.append(ran)
                 latest = max(latest, ran.filename)
+            with conn.transaction():
+                conn.execute(queries.ENSURE_RERUNS)
+            for rerun in ledger.due(reruns, ledger.read_reruns(conn)):
+                reran.append(_rerun(conn, rerun, say))
         finally:
             if not conn.closed:
                 conn.execute(queries.UNLOCK, (queries.LOCK_KEY,))
-    return Result(target, applied)
+    return Result(target, applied, reruns=reran)
+
+
+def plan(url: str, packages: Sequence[str]) -> Plan:
+    """What `migrate` would run, in order, with the settings each file gets.
+    Read-only; refuses what `migrate` would refuse."""
+    migrations = files.find(packages)
+    reruns = files.reruns(packages)
+    with database.connect(url) as conn:
+        status = ledger.status(conn, migrations, reruns)
+    ledger.refuse(status)
+    ledger.refuse_ahead(status)
+    return Plan(
+        status.target,
+        [Step(p.migration, _settings(p.migration)) for p in status.pending]
+        + [Step(r, _settings(r)) for r in status.reruns_due],
+    )
+
+
+def _settings(migration: files.Migration) -> dict[str, str]:
+    defaults = DEFAULTS if migration.transaction else NO_TRANSACTION_DEFAULTS
+    return defaults | migration.settings
+
+
+def _rerun(conn: psycopg.Connection, rerun: files.Migration, say: Echo) -> Ran:
+    settings = _settings(rerun)
+    conn.execute("RESET ALL")
+    conn.execute("RESET ROLE")
+    for name, value in settings.items():
+        conn.execute(queries.SET, (name.replace("-", "_"), value))
+    started = time.perf_counter()
+    try:
+        with conn.transaction():
+            conn.execute(rerun.text.encode())
+            conn.execute(
+                queries.RECORD_RERUN, (rerun.package, rerun.filename, rerun.checksum)
+            )
+    except psycopg.Error as problem:
+        raise _failed(conn, rerun, problem, settings) from None
+    ran = Ran(f"rerun/{rerun.filename}", rerun.package, _ms(started), False, True)
+    say(f"rerun    {rerun.where}  {ran.duration_ms} ms")
+    return ran
 
 
 def _baseline(
@@ -133,8 +193,7 @@ def _run(
     conn: psycopg.Connection, pending: ledger.Pending, latest: str, say: Echo
 ) -> Ran:
     migration = pending.migration
-    defaults = DEFAULTS if migration.transaction else NO_TRANSACTION_DEFAULTS
-    settings = defaults | migration.settings
+    settings = _settings(migration)
     out_of_order = migration.filename < latest
     if not migration.transaction:
         _refuse_invalid_indexes(conn, migration)
@@ -152,7 +211,7 @@ def _run(
                     conn.execute(migration.text.encode())
                     if conn.info.transaction_status != TransactionStatus.INTRANS:
                         raise MigrationFailed(
-                            f"{_where(migration)} ended pgforward's transaction "
+                            f"{migration.where} ended pgforward's transaction "
                             "itself; part of it may be applied",
                             "remove the COMMIT, ROLLBACK or BEGIN from it, and "
                             "check what it left in the database",
@@ -205,7 +264,7 @@ def _refuse_invalid_indexes(
         return
     when = "after it ran" if after else "before it could run"
     raise MigrationFailed(
-        f"{_where(migration)}: invalid index {', '.join(invalid)} in the "
+        f"{migration.where}: invalid index {', '.join(invalid)} in the "
         f"database {when}; a concurrent index build left it half made",
         _drop_invalid(invalid),
     )
@@ -236,7 +295,7 @@ def _failed(
     problem: psycopg.Error,
     settings: dict[str, str],
 ) -> MigrationFailed:
-    where = _where(migration)
+    where = migration.where
     if conn.closed:
         after = (
             "it rolled back"
@@ -311,10 +370,6 @@ def _failed(
 def _drop_invalid(names: list[str]) -> str:
     drops = " ".join(f"DROP INDEX CONCURRENTLY {name};" for name in names)
     return f"drop it, then run `pgforward migrate` again: {drops}"
-
-
-def _where(migration: files.Migration) -> str:
-    return f"{migration.package}/migrations/{migration.filename}"
 
 
 def _line(ran: Ran) -> str:

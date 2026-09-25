@@ -95,6 +95,13 @@ class Package:
         path.write_text(text)
         return path
 
+    def rerun(self, filename: str, text: str) -> pathlib.Path:
+        folder = self.folder.parent / "rerun"
+        folder.mkdir(exist_ok=True)
+        path = folder / filename
+        path.write_text(text)
+        return path
+
 
 @pytest.fixture
 def make_package(tmp_path, monkeypatch):

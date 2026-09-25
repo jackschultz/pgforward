@@ -46,10 +46,18 @@ class Status:
     # database with files the checkout lacks (after a branch switch) is
     # rebuilt instead.
     ahead: list[str] = dataclasses.field(default_factory=list)
+    # Re-run files that are new or changed since they last ran.
+    reruns_due: list[files.Migration] = dataclasses.field(default_factory=list)
+
+    @property
+    def pending_names(self) -> list[str]:
+        return [p.migration.filename for p in self.pending] + [
+            f"{r.package}/rerun/{r.filename}" for r in self.reruns_due
+        ]
 
     @property
     def current(self) -> bool:
-        return not self.pending and not self.problems
+        return not self.pending and not self.problems and not self.reruns_due
 
 
 def read(conn: psycopg.Connection) -> list[Applied]:
@@ -134,10 +142,27 @@ def compare(
     return Status(target, list(applied), pending, problems, ahead)
 
 
-def status(conn: psycopg.Connection, migrations: Sequence[files.Migration]) -> Status:
+def status(
+    conn: psycopg.Connection,
+    migrations: Sequence[files.Migration],
+    reruns: Sequence[files.Migration] = (),
+) -> Status:
     with conn.transaction():
         conn.execute("SET TRANSACTION READ ONLY")
-        return compare(database.target(conn), migrations, read(conn))
+        found = compare(database.target(conn), migrations, read(conn))
+        return dataclasses.replace(found, reruns_due=due(reruns, read_reruns(conn)))
+
+
+def read_reruns(conn: psycopg.Connection) -> dict[tuple[str, str], str]:
+    if not database.one(conn, queries.RERUNS_EXIST)[0]:
+        return {}
+    return {(p, f): c for p, f, c in conn.execute(queries.READ_RERUNS)}
+
+
+def due(
+    reruns: Sequence[files.Migration], recorded: dict[tuple[str, str], str]
+) -> list[files.Migration]:
+    return [r for r in reruns if recorded.get((r.package, r.filename)) != r.checksum]
 
 
 def refuse(status: Status) -> None:

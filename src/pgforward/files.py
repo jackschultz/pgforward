@@ -4,6 +4,9 @@ Each package keeps its migrations in `<package>/migrations/`. They are read
 through the installed package, so an app installed from a wheel finds its own
 files and its libraries' alike. Every file is ordered by name, which starts
 with a timestamp, into one sequence.
+
+A package may also keep re-run files in `<package>/rerun/`: views, functions
+and grants, written to be run again, and run again whenever they change.
 """
 
 import dataclasses
@@ -20,6 +23,7 @@ from pgforward import statements
 from pgforward.errors import ConfigError
 
 NAME = re.compile(r"^\d{14}_[a-z0-9_]+\.sql$")
+RERUN_NAME = re.compile(r"^[a-z0-9_]+\.sql$")
 DIRECTIVE = re.compile(r"^--\s*pgforward:(.*)$")
 DURATION = re.compile(r"^\d+(ms|s|min|h)?$")
 SETTINGS = ("lock-timeout", "statement-timeout")
@@ -34,6 +38,11 @@ class Migration:
     checksum: str
     transaction: bool
     settings: dict[str, str]
+    folder: str = "migrations"
+
+    @property
+    def where(self) -> str:
+        return f"{self.package}/{self.folder}/{self.filename}"
 
 
 def find(packages: Sequence[str]) -> list[Migration]:
@@ -48,6 +57,35 @@ def find(packages: Sequence[str]) -> list[Migration]:
                 )
             found[migration.filename] = migration
     return [found[name] for name in sorted(found)]
+
+
+def reruns(packages: Sequence[str]) -> list[Migration]:
+    """Every package's re-run files: libraries' before the app's (the app is
+    listed first), so an app's view can build on a library's, and by name
+    within a package."""
+    found = []
+    for package in reversed(packages):
+        rerun = _root(package) / "rerun"
+        if not rerun.is_dir():
+            continue
+        for entry in sorted(rerun.iterdir(), key=lambda e: e.name):
+            if ".sql" not in entry.name.lower():
+                continue
+            if not RERUN_NAME.fullmatch(entry.name):
+                raise ConfigError(
+                    f"{package}/rerun/{entry.name}: a re-run file is named "
+                    "<lowercase_words>.sql",
+                    "rename it, for example grants.sql or views.sql",
+                )
+            migration = _read(package, entry, "rerun")
+            if not migration.transaction:
+                raise ConfigError(
+                    f"{migration.where}: a re-run file always runs in a "
+                    "transaction; `-- pgforward: no-transaction` is for migrations",
+                    "move that statement into a migration",
+                )
+            found.append(migration)
+    return found
 
 
 def folder(package: str) -> Traversable:
@@ -115,33 +153,35 @@ def _package_files(package: str) -> list[Migration]:
                 "pgforward new <description> writes a correctly named file; "
                 "rename or move this one",
             )
-        data = entry.read_bytes()
-        try:
-            text = data.decode("utf-8-sig")
-        except UnicodeDecodeError as problem:
-            raise ConfigError(
-                f"{where} is not UTF-8 (byte {problem.start})",
-                "save it as UTF-8",
-            ) from None
-        found = statements.split(text)
-        if not found:
-            raise ConfigError(
-                f"{where} holds no SQL", "write the migration in it, or delete it"
-            )
-        transaction, settings = _directives(where, text)
-        _check_statements(where, found, transaction)
-        migrations.append(
-            Migration(
-                filename=entry.name,
-                package=package,
-                source=entry,
-                text=text,
-                checksum=hashlib.sha256(data).hexdigest(),
-                transaction=transaction,
-                settings=settings,
-            )
-        )
+        migrations.append(_read(package, entry, "migrations"))
     return migrations
+
+
+def _read(package: str, entry: Traversable, folder: str) -> Migration:
+    where = f"{package}/{folder}/{entry.name}"
+    data = entry.read_bytes()
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as problem:
+        raise ConfigError(
+            f"{where} is not UTF-8 (byte {problem.start})",
+            "save it as UTF-8",
+        ) from None
+    found = statements.split(text)
+    if not found:
+        raise ConfigError(f"{where} holds no SQL", "write the SQL in it, or delete it")
+    transaction, settings = _directives(where, text)
+    _check_statements(where, found, transaction)
+    return Migration(
+        filename=entry.name,
+        package=package,
+        source=entry,
+        text=text,
+        checksum=hashlib.sha256(data).hexdigest(),
+        transaction=transaction,
+        settings=settings,
+        folder=folder,
+    )
 
 
 def _directives(where: str, text: str) -> tuple[bool, dict[str, str]]:
