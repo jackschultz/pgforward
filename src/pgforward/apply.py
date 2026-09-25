@@ -70,6 +70,7 @@ def migrate(
             _baseline(conn, migrations, recorded, say)
             status = ledger.compare(target, migrations, ledger.read(conn))
             ledger.refuse(status)
+            ledger.refuse_ahead(status)
             latest = max((a.filename for a in status.applied), default="")
             for pending in status.pending:
                 ran = _run(conn, pending, latest, say)

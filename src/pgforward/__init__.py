@@ -88,9 +88,14 @@ def rebuild(
     say = echo or (lambda _: None)
     files.find(names)
     with database.connect(url) as conn:
-        say(database.target(conn).describe())
-    rebuilt = database.recreate(url)
-    say(f"rebuilt  {rebuilt.name}: dropped, created empty, still {rebuilt.kind}")
+        current = database.target(conn)
+    say(current.describe())
+    with database.serialized(url, current.name):
+        rebuilt = database.recreate(url)
+    say(
+        f"rebuilt  {rebuilt.name}: dropped (ending its other sessions), created "
+        f"empty, still {rebuilt.kind}"
+    )
     named = False
 
     def without_the_name_again(line: str) -> None:
@@ -112,7 +117,9 @@ def status(url: str, packages: Sequence[str] | None = None) -> Status:
 def pending(url: str, packages: Sequence[str] | None = None) -> list[str]:
     """File names not yet applied, in the order they would run. Read-only.
 
-    Raises LedgerMismatch when an applied file changed or went missing."""
+    Raises LedgerMismatch when an applied file changed or went missing. A
+    database that has run a newer release's migrations is not an error here:
+    `status(url).ahead` names them."""
     current = status(url, packages)
     ledger.refuse(current)
     return [p.migration.filename for p in current.pending]

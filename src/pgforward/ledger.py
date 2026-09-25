@@ -39,6 +39,10 @@ class Status:
     applied: list[Applied]
     pending: list[Pending]
     problems: list[Problem]
+    # Applied here, missing from disk, and newer than every file on disk: the
+    # database has run a newer release's migrations, as it does while old
+    # instances still serve during a rolling deploy. Not a problem for them.
+    ahead: list[str] = dataclasses.field(default_factory=list)
 
     @property
     def current(self) -> bool:
@@ -92,8 +96,16 @@ def compare(
 ) -> Status:
     on_disk = {m.filename: m for m in migrations}
     ran = {a.filename: a for a in applied}
+    newest_on_disk = max(on_disk, default="")
+    ahead = sorted(
+        a.filename
+        for a in applied
+        if a.filename not in on_disk and a.filename > newest_on_disk
+    )
     problems = [
-        Problem("missing", a.filename) for a in applied if a.filename not in on_disk
+        Problem("missing", a.filename)
+        for a in applied
+        if a.filename not in on_disk and a.filename not in ahead
     ] + [
         Problem("changed", a.filename)
         for a in applied
@@ -101,13 +113,13 @@ def compare(
         and a.checksum is not None
         and on_disk[a.filename].checksum != a.checksum
     ]
-    latest = max(ran, default="")
+    latest = max((name for name in ran if name in on_disk), default="")
     pending = [
         Pending(m, out_of_order=m.filename < latest)
         for m in migrations
         if m.filename not in ran
     ]
-    return Status(target, list(applied), pending, problems)
+    return Status(target, list(applied), pending, problems, ahead)
 
 
 def status(conn: psycopg.Connection, migrations: Sequence[files.Migration]) -> Status:
@@ -139,3 +151,14 @@ def refuse(status: Status) -> None:
             "(`pgforward new <description>`)"
         )
     raise LedgerMismatch(f"{status.target.describe()}: {'; '.join(parts)}", fix)
+
+
+def refuse_ahead(status: Status) -> None:
+    """Refuse to migrate from code older than the database."""
+    if status.ahead:
+        raise LedgerMismatch(
+            f"{status.target.describe()} has run migrations this code does not "
+            f"have: {', '.join(status.ahead)}. It is ahead of this code",
+            "migrate from the release that has them; an older release never "
+            "migrates a newer database",
+        )

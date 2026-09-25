@@ -57,12 +57,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    common = argparse.ArgumentParser(add_help=False)
+    output = argparse.ArgumentParser(add_help=False)
+    output.add_argument("--json", action="store_true", help="machine-readable output")
+    common = argparse.ArgumentParser(add_help=False, parents=[output])
     common.add_argument(
         "--url",
         help="database address; default MIGRATION_DATABASE_URL, else DATABASE_URL",
     )
-    common.add_argument("--json", action="store_true", help="machine-readable output")
     parser = argparse.ArgumentParser(
         prog="pgforward",
         description="Postgres migrations in plain SQL files, forward only. "
@@ -73,20 +74,35 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(required=True, metavar="command")
 
-    def add(name: str, run, text: str) -> argparse.ArgumentParser:
-        sub = commands.add_parser(name, parents=[common], help=text, description=text)
+    def add(name: str, run, text: str, database=True) -> argparse.ArgumentParser:
+        sub = commands.add_parser(
+            name,
+            parents=[common if database else output],
+            help=text,
+            description=text,
+        )
         sub.set_defaults(run=run)
         return sub
 
     add("status", _status, "what is applied and pending; exits 1 when pending")
     add("migrate", _migrate, "apply what is pending")
-    new = add("new", _new, "create an empty, correctly named migration file")
+    new = add(
+        "new",
+        _new,
+        "create an empty migration file, named with the current UTC time",
+        database=False,
+    )
     new.add_argument("description", nargs="+", help="what the migration does")
-    add("rebuild", _rebuild, "drop a test or branch database and apply every file")
+    add(
+        "rebuild",
+        _rebuild,
+        "drop a test or branch database, ending its other sessions, and apply "
+        "every file",
+    )
     mark = add("mark", _mark, "record what kind of database this is")
     mark.add_argument("kind", choices=database.KINDS)
     add("schema", _schema, "rewrite schema.sql from a fresh build of every file")
-    add("guide", _guide, "print the guide for this version")
+    add("guide", _guide, "print the guide for this version", database=False)
     return parser
 
 
@@ -118,6 +134,7 @@ def _status(args: argparse.Namespace) -> int:
                     for p in current.pending
                 ],
                 "problems": [vars(p) for p in current.problems],
+                "ahead": current.ahead,
                 "fix": fix,
             }
         )
@@ -132,9 +149,19 @@ def _status(args: argparse.Namespace) -> int:
         print(f"pending  {p.migration.filename}  {p.migration.package}{late}")
     for problem in current.problems:
         print(f"problem  {problem.kind}  {problem.filename}")
+    for name in current.ahead:
+        print(
+            f"ahead    {name}  the database ran it and this code does not have it: "
+            "a newer release's migration"
+        )
     print(f"applied  {len(current.applied)}, pending {len(current.pending)}")
-    if current.applied:
-        print(f"latest   {max(a.filename for a in current.applied)}")
+    on_disk = (
+        {a.filename for a in current.applied}
+        - {p.filename for p in current.problems}
+        - set(current.ahead)
+    )
+    if on_disk:
+        print(f"latest   {max(on_disk)}")
     if fix:
         print(f"fix: {fix}")
     elif current.pending:

@@ -12,6 +12,10 @@ class PgforwardError(Exception):
         self.message = message
         self.fix = fix
 
+    def __str__(self) -> str:
+        # What a traceback shows, in pytest say, where no CLI prints the fix.
+        return f"{self.message}\nfix: {self.fix}" if self.fix else self.message
+
 
 class ConfigError(PgforwardError):
     """The project or the command is missing something pgforward needs."""

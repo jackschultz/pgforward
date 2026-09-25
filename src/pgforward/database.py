@@ -15,6 +15,7 @@ A database nobody marked is treated as standing.
 import contextlib
 import dataclasses
 import secrets
+import time
 from collections.abc import Iterator
 from typing import Any, Literal, LiteralString, cast
 
@@ -23,7 +24,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from pgforward import queries
-from pgforward.errors import ConfigError, Refused
+from pgforward.errors import ConfigError, LockTimeout, Refused
 
 Kind = Literal["test", "branch", "standing", "production"]
 KINDS: tuple[Kind, ...] = ("test", "branch", "standing", "production")
@@ -92,7 +93,16 @@ def one(
 
 
 def same_database(url: str, other: str) -> bool:
-    return _address(url) == _address(other)
+    """Whether two addresses reach one database, asked of the servers, and
+    by the addresses alone when either cannot be reached."""
+    try:
+        with (
+            connect(url, connect_timeout=5) as a,
+            connect(other, connect_timeout=5) as b,
+        ):
+            return one(a, queries.IDENTITY) == one(b, queries.IDENTITY)
+    except psycopg.OperationalError:
+        return _address(url) == _address(other)
 
 
 def _address(url: str) -> tuple[str, str, str]:
@@ -144,6 +154,26 @@ def recreate(url: str) -> Target:
         _set_kind(admin, current.name, current.kind)
     with connect(url) as conn:
         return target(conn)
+
+
+@contextlib.contextmanager
+def serialized(url: str, name: str, wait: float = 60) -> Iterator[None]:
+    """Hold a lock named for this database while dropping and rebuilding it,
+    so another run waits instead of dropping it underneath."""
+    key = f"pgforward:{name}"
+    with _maintenance(url) as admin:
+        deadline = time.monotonic() + wait
+        while not one(admin, queries.TRY_DATABASE_LOCK, (key,))[0]:
+            if time.monotonic() >= deadline:
+                raise LockTimeout(
+                    f"another run has been rebuilding {name} for over {wait:.0f} s",
+                    "wait for it to finish, then run again",
+                )
+            time.sleep(0.5)
+        try:
+            yield
+        finally:
+            admin.execute(queries.DATABASE_UNLOCK, (key,))
 
 
 @contextlib.contextmanager

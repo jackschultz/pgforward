@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from support import CHECKS, query
 
 import pgforward
@@ -146,3 +147,28 @@ def test_schema_names_its_database(project, app, db, capsys):
 
     assert code == 0
     assert json.loads(out)["database"]["kind"] == "standing"
+
+
+def test_status_names_what_the_database_ran_ahead_of_the_code(project, app, db, capsys):
+    app.add("20260101000000_checks.sql", CHECKS)
+    newer = app.add("20260102000000_more.sql", "ALTER TABLE checks ADD COLUMN m int;")
+    run(capsys, "migrate", "--url", db)
+    newer.unlink()
+
+    code, out, _ = run(capsys, "status", "--url", db)
+
+    assert code == 0
+    assert "ahead    20260102000000_more.sql" in out
+    assert "latest   20260101000000_checks.sql" in out
+
+
+def test_new_and_guide_take_no_database_address(capsys):
+    for command in ("new", "guide"):
+        with pytest.raises(SystemExit):
+            cli.main([command, "--help"])
+        assert "--url" not in capsys.readouterr().out
+
+
+def test_an_error_shown_as_text_carries_its_fix():
+    problem = pgforward.Refused("the database is not disposable", "mark it branch")
+    assert str(problem) == "the database is not disposable\nfix: mark it branch"

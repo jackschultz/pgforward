@@ -54,8 +54,10 @@ def prepare(url: str, packages: Sequence[str] | None = None) -> list[str]:
             f"{target.describe()} is marked {target.marked}, not test",
             "point TEST_DATABASE_URL at a test database",
         )
-    with database.connect(url) as conn:
-        status = ledger.status(conn, files.find(names))
-    if status.problems or any(p.out_of_order for p in status.pending):
-        database.recreate(url)
-    return [ran.filename for ran in apply.migrate(url, names).applied]
+    migrations = files.find(names)
+    with database.serialized(url, target.name):
+        with database.connect(url) as conn:
+            status = ledger.status(conn, migrations)
+        if status.problems or any(p.out_of_order for p in status.pending):
+            database.recreate(url)
+        return [ran.filename for ran in apply.migrate(url, names).applied]

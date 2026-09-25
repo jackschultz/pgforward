@@ -94,3 +94,15 @@ ORDER BY 1
 """
 
 SERVER_VERSION = "SELECT current_setting('server_version_num')::int / 10000"
+
+# Which database this is, as the server reports it: two addresses that spell
+# the same server differently still give the same answer.
+IDENTITY = """
+SELECT (SELECT system_identifier FROM pg_control_system())::text,
+       current_database()
+"""
+
+# Taken on the server's postgres database, keyed by the name of the database
+# about to be dropped, so two runs cannot drop it under each other.
+TRY_DATABASE_LOCK = "SELECT pg_try_advisory_lock(hashtext(%s))"
+DATABASE_UNLOCK = "SELECT pg_advisory_unlock(hashtext(%s))"

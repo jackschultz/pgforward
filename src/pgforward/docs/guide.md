@@ -25,10 +25,11 @@ An empty or missing address is an error, never a fallback to another one.
 
 ## Commands
 
-    pgforward new add_last_ping_at   create src/myapp/migrations/<timestamp>_add_last_ping_at.sql
+    pgforward new add_last_ping_at   create src/myapp/migrations/<UTC timestamp>_add_last_ping_at.sql
     pgforward migrate                apply what is pending; on a branch database, rewrite schema.sql
     pgforward status                 applied and pending; exit 0 current, 1 pending, 2 problem
-    pgforward rebuild                drop a test or branch database and apply every file
+    pgforward rebuild                drop a test or branch database (ending its other
+                                     sessions) and apply every file
     pgforward mark branch            record the database's kind (test, branch, standing, production)
     pgforward schema                 rewrite schema.sql from a fresh build of every file
     pgforward guide                  this text
@@ -135,9 +136,11 @@ as the server, and a role that may create databases.
         return url
 
 `prepare` refuses unless the database's name ends in `_test`, it is not the
-database `DATABASE_URL` names, and it is marked test (an unmarked one is
-marked test). It migrates the database, and rebuilds it first when an applied
-file changed or a file would run out of order.
+database `DATABASE_URL` names (asked of the server, so two spellings of one
+address are caught), and it is marked test (an unmarked one is marked test).
+It migrates the database, and rebuilds it first when an applied file changed
+or a file would run out of order. Two test runs at once wait for each other
+rather than drop the database under each other.
 
 ## From the application
 
@@ -148,8 +151,15 @@ file changed or a file would run out of order.
     pgforward.status(url)      # applied, pending, problems
 
 A health endpoint reports `pending(url)` and answers unhealthy while it is
-not empty. `packages` defaults to pyproject.toml's list; pass it when the
+not empty. `pending` raises when an applied file changed, or went missing
+from among the files on disk. A database that has run a newer release's
+migrations (during a rolling deploy, while old instances still serve) is not
+an error: `status(url).ahead` names those files, and `migrate` from the older
+code refuses. `packages` defaults to pyproject.toml's list; pass it when the
 app runs where pyproject.toml is not.
+
+The role the application runs as needs `SELECT` on
+`public.schema_migrations` for these to work.
 
 ## Production
 

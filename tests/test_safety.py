@@ -1,5 +1,8 @@
 """The guards: which database, what kind, and what may be done to it."""
 
+import threading
+import time
+
 import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
@@ -129,12 +132,27 @@ def test_status_and_pending_never_write(db, app):
 
 def test_pending_raises_when_an_applied_file_is_missing(db, app):
     path = app.add("20260101000000_checks.sql", CHECKS)
+    app.add("20260102000000_more.sql", "ALTER TABLE checks ADD COLUMN more int;")
     pgforward.migrate(db, [app.name])
     path.unlink()
 
     with pytest.raises(pgforward.LedgerMismatch) as refused:
         pgforward.pending(db, [app.name])
     assert "missing" in refused.value.message
+
+
+def test_a_database_ahead_of_the_code_is_reported_not_raised(db, app):
+    """A rolling deploy: the new release migrated, old instances still serve."""
+    app.add("20260101000000_checks.sql", CHECKS)
+    newer = app.add("20260102000000_more.sql", "ALTER TABLE checks ADD COLUMN m int;")
+    pgforward.migrate(db, [app.name])
+    newer.unlink()
+
+    assert pgforward.pending(db, [app.name]) == []
+    assert pgforward.status(db, [app.name]).ahead == ["20260102000000_more.sql"]
+    with pytest.raises(pgforward.LedgerMismatch) as refused:
+        pgforward.migrate(db, [app.name])
+    assert "ahead of this code" in refused.value.message
 
 
 @pytest.mark.parametrize(
@@ -265,3 +283,36 @@ def test_a_null_checksum_is_unrecorded_not_changed(db, app):
     query(db, "UPDATE public.schema_migrations SET checksum = NULL")
 
     assert pgforward.status(db, [app.name]).problems == []
+
+
+def test_prepare_refuses_the_development_database_however_it_is_spelled(
+    make_database, app, monkeypatch
+):
+    url = make_database("_test")
+    monkeypatch.setenv("DATABASE_URL", make_conninfo(url, host="0.0.0.0"))
+
+    with pytest.raises(pgforward.Refused):
+        testing.prepare(url, [app.name])
+
+
+def test_prepare_waits_while_another_run_rebuilds_the_test_database(
+    make_database, app, server_url
+):
+    url = make_database("_test")
+    name = query(url, "SELECT current_database()")[0][0]
+    app.add("20260101000000_checks.sql", CHECKS)
+    done: list[list[str]] = []
+    with psycopg.connect(
+        make_conninfo(server_url, dbname="postgres"), autocommit=True
+    ) as other:
+        other.execute("SELECT pg_advisory_lock(hashtext(%s))", (f"pgforward:{name}",))
+        waiting = threading.Thread(
+            target=lambda: done.append(testing.prepare(url, [app.name])), daemon=True
+        )
+        waiting.start()
+        time.sleep(1.0)
+        assert done == []
+        other.execute("SELECT pg_advisory_unlock(hashtext(%s))", (f"pgforward:{name}",))
+        waiting.join(timeout=10)
+
+    assert done == [["20260101000000_checks.sql"]]
