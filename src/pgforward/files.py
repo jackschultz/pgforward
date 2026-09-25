@@ -84,6 +84,14 @@ def new(package: str, description: str, now: dt.datetime | None = None) -> pathl
     return path
 
 
+def _real_time(stamp: str) -> bool:
+    try:
+        dt.datetime.strptime(stamp, "%Y%m%d%H%M%S")
+    except ValueError:
+        return False
+    return True
+
+
 def _root(package: str) -> Traversable:
     try:
         return importlib.resources.files(package)
@@ -100,7 +108,7 @@ def _package_files(package: str) -> list[Migration]:
         where = f"{package}/migrations/{entry.name}"
         if ".sql" not in entry.name.lower():
             continue
-        if not NAME.fullmatch(entry.name):
+        if not NAME.fullmatch(entry.name) or not _real_time(entry.name[:14]):
             raise ConfigError(
                 f"{where}: a migration is named YYYYMMDDHHMMSS_description.sql, "
                 "lowercase",

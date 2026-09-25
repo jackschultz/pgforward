@@ -17,11 +17,14 @@ def test_a_name_in_two_packages_is_an_error(app, make_package):
     assert app.name in refused.value.message and other.name in refused.value.message
 
 
-def test_a_badly_named_file_is_an_error(app):
-    app.add("001_checks.sql", CHECKS)
+@pytest.mark.parametrize(
+    "name", ["001_checks.sql", "20260925999999_checks.sql", "20261301000000_x.sql"]
+)
+def test_a_badly_named_file_is_an_error(app, name):
+    app.add(name, CHECKS)
     with pytest.raises(pgforward.ConfigError) as refused:
         files.find([app.name])
-    assert "001_checks.sql" in refused.value.message
+    assert name in refused.value.message
 
 
 @pytest.mark.parametrize(
