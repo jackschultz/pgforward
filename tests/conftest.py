@@ -95,6 +95,13 @@ class Package:
         path.write_text(text)
         return path
 
+    def rerun(self, filename: str, text: str) -> pathlib.Path:
+        folder = self.folder.parent / "rerun"
+        folder.mkdir(exist_ok=True)
+        path = folder / filename
+        path.write_text(text)
+        return path
+
 
 @pytest.fixture
 def make_package(tmp_path, monkeypatch):
@@ -130,6 +137,20 @@ def limited_role(server_url):
             )
         )
     yield name, lambda url: make_conninfo(url, user=name, password=password)
+    with psycopg.connect(server_url, autocommit=True) as conn:
+        databases = [
+            row[0]
+            for row in conn.execute(
+                "SELECT datname FROM pg_database WHERE datname LIKE 'pft\\_%'"
+            )
+        ]
+    # Grants a test gave the role live in each database; DROP OWNED clears
+    # them there, so DROP ROLE can succeed.
+    for database in databases:
+        with psycopg.connect(
+            make_conninfo(server_url, dbname=database), autocommit=True
+        ) as conn:
+            conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(name)))
     with psycopg.connect(server_url, autocommit=True) as conn:
         rows = conn.execute(
             "SELECT datname FROM pg_database WHERE datdba = %s::regrole", (name,)

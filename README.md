@@ -26,6 +26,10 @@ agents get them right the first time.
   databases, so the column order is the one a new database gets.
 - **Libraries ship their migrations** inside their package; the app lists them
   and every file runs in one ledger.
+- **Re-run files** for views, functions and grants, run again whenever they
+  change; `pgforward grants` checks what the runtime role holds.
+- **`migrate --dry-run`** and **`schema --check`**: the SQL that would run, and
+  how a database differs from a fresh build.
 - **A test guard** (`pgforward.testing.prepare`) and a read-only `pending()`
   for health endpoints.
 - `--json` output with a stable shape; exit codes 0 current, 1 pending,

@@ -6,6 +6,7 @@ after theirs on the working database but before them on a fresh build, so a
 dump of the working database carries an order nobody chose.
 """
 
+import difflib
 import pathlib
 import re
 import shutil
@@ -41,8 +42,38 @@ def write(
     echo: Callable[[str], None] | None = None,
 ) -> database.Target:
     pg_dump, target = _pg_dump(url)
+    fresh, name = _fresh(url, packages, pg_dump)
+    path.write_text(fresh)
+    if echo:
+        echo(
+            f"scratch  built schema.sql in {name}, a database created on this "
+            "server for it and dropped again"
+        )
+    return target
+
+
+def check(
+    url: str, packages: Sequence[str], echo: Callable[[str], None] | None = None
+) -> tuple[database.Target, list[str]]:
+    """How this database's schema differs from a fresh build of every file:
+    unified diff lines, empty when they match."""
+    pg_dump, target = _pg_dump(url)
+    fresh, name = _fresh(url, packages, pg_dump)
+    if echo:
+        echo(
+            f"scratch  built every file in {name}, a database created on this "
+            "server for it and dropped again"
+        )
+    here = _dump(pg_dump, url)
+    diff = difflib.unified_diff(
+        fresh.splitlines(), here.splitlines(), "fresh build", target.name, lineterm=""
+    )
+    return target, list(diff)
+
+
+def _fresh(url: str, packages: Sequence[str], pg_dump: str) -> tuple[str, str]:
     with database.scratch(url) as scratch:
-        name = conninfo_to_dict(scratch)["dbname"]
+        name = str(conninfo_to_dict(scratch)["dbname"])
         try:
             apply.migrate(scratch, packages)
         except MigrationFailed as problem:
@@ -53,31 +84,30 @@ def write(
                 f"on a branch database, `pgforward rebuild` shows it here. "
                 f"{problem.fix}",
             ) from None
-        dumped = subprocess.run(
-            [
-                pg_dump,
-                "--schema-only",
-                "--no-owner",
-                "--no-privileges",
-                "--exclude-table=public.schema_migrations",
-                "--dbname",
-                scratch,
-            ],
-            capture_output=True,
-            text=True,
-        )
+        return _dump(pg_dump, scratch), name
+
+
+def _dump(pg_dump: str, url: str) -> str:
+    dumped = subprocess.run(
+        [
+            pg_dump,
+            "--schema-only",
+            "--no-owner",
+            "--no-privileges",
+            "--exclude-table=public.schema_migrations",
+            "--exclude-table=public.schema_reruns",
+            "--dbname",
+            url,
+        ],
+        capture_output=True,
+        text=True,
+    )
     if dumped.returncode != 0:
         raise SchemaDumpFailed(
             f"pg_dump failed: {dumped.stderr.strip()}",
-            "fix what it names, then run `pgforward schema`",
+            "fix what it names, then run the command again",
         )
-    path.write_text(normalize(dumped.stdout))
-    if echo:
-        echo(
-            f"scratch  built schema.sql in {name}, a database created on this "
-            "server for it and dropped again"
-        )
-    return target
+    return normalize(dumped.stdout)
 
 
 def normalize(dump: str) -> str:

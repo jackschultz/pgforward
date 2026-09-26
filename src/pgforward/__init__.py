@@ -6,6 +6,9 @@
     pgforward.pending(url)            file names not yet applied, for /health
     pgforward.status(url)             applied, pending, and any disagreement
     pgforward.testing.prepare(url)    bring a test database up to date, guarded
+    pgforward.plan(url)               what migrate would run, read-only
+    pgforward.grants(url, role)       what the runtime role may do, read-only
+    pgforward.check_schema(url)       differences from a fresh build
 
 `packages` defaults to [tool.pgforward] packages in the nearest pyproject.toml.
 """
@@ -14,8 +17,17 @@ import dataclasses
 import pathlib
 from collections.abc import Sequence
 
-from pgforward import apply, config, database, files, ledger, schema, testing
-from pgforward.apply import Echo, Ran, Result
+from pgforward import (
+    apply,
+    config,
+    database,
+    files,
+    grants_check,
+    ledger,
+    schema,
+    testing,
+)
+from pgforward.apply import Echo, Plan, Ran, Result, Step
 from pgforward.database import Kind, Target
 from pgforward.errors import (
     ConfigError,
@@ -36,15 +48,20 @@ __all__ = [
     "LockTimeout",
     "MigrationFailed",
     "PgforwardError",
+    "Plan",
     "Ran",
     "Refused",
     "Result",
     "SchemaDumpFailed",
     "Status",
+    "Step",
     "Target",
+    "check_schema",
+    "grants",
     "mark",
     "migrate",
     "pending",
+    "plan",
     "rebuild",
     "status",
     "testing",
@@ -109,9 +126,10 @@ def rebuild(
 
 def status(url: str, packages: Sequence[str] | None = None) -> Status:
     """What the ledger says ran, against the files. Read-only."""
-    migrations = files.find(_packages(packages))
+    names = _packages(packages)
+    migrations, reruns = files.find(names), files.reruns(names)
     with database.connect(url) as conn:
-        return ledger.status(conn, migrations)
+        return ledger.status(conn, migrations, reruns)
 
 
 def pending(url: str, packages: Sequence[str] | None = None) -> list[str]:
@@ -122,7 +140,26 @@ def pending(url: str, packages: Sequence[str] | None = None) -> list[str]:
     `status(url).ahead` names them."""
     current = status(url, packages)
     ledger.refuse(current)
-    return [p.migration.filename for p in current.pending]
+    return current.pending_names
+
+
+def plan(url: str, packages: Sequence[str] | None = None) -> Plan:
+    """What `migrate` would run, in order, with each file's settings; nothing
+    is written."""
+    return apply.plan(url, _packages(packages))
+
+
+def grants(url: str, role: str) -> grants_check.Grants:
+    """What `role` may do on each of the application's tables. Read-only."""
+    return grants_check.check(url, role)
+
+
+def check_schema(
+    url: str, packages: Sequence[str] | None = None, echo: Echo | None = None
+) -> tuple[Target, list[str]]:
+    """How this database's schema differs from a fresh build of every file, as
+    unified diff lines; empty when they match."""
+    return schema.check(url, _packages(packages), echo)
 
 
 def mark(url: str, kind: Kind) -> tuple[Target, Target]:
