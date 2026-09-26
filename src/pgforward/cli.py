@@ -260,7 +260,7 @@ def _grants(args: argparse.Namespace) -> int:
         return 0
     print(
         f"fix: grant {found.role} what it needs in the re-run file that holds "
-        "the grants (rerun/grants.sql), then pgforward migrate"
+        "the grants (in rerun/), then pgforward migrate"
     )
     return 1
 

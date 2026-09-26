@@ -26,12 +26,16 @@ An empty or missing address is an error, never a fallback to another one.
 ## Commands
 
     pgforward new add_last_ping_at   create src/myapp/migrations/<UTC timestamp>_add_last_ping_at.sql
-    pgforward migrate                apply what is pending; on a branch database, rewrite schema.sql
+    pgforward migrate                apply what is pending, then changed re-run files;
+                                     on a branch database, rewrite schema.sql
+    pgforward migrate --dry-run      print the SQL that would run, with its settings
     pgforward status                 applied and pending; exit 0 current, 1 pending, 2 problem
     pgforward rebuild                drop a test or branch database (ending its other
                                      sessions) and apply every file
     pgforward mark branch            record the database's kind (test, branch, standing, production)
     pgforward schema                 rewrite schema.sql from a fresh build of every file
+    pgforward schema --check         compare this database with a fresh build; exit 1 if different
+    pgforward grants --role app      what the runtime role may do on each table
     pgforward guide                  this text
 
 Every command's first line names the database and its kind. Add `--json` for
@@ -83,6 +87,46 @@ before it was recorded. An unknown or misplaced `-- pgforward:` line, a file
 named like a migration but not quite (`.SQL`), and a file with no SQL are
 errors, never skipped.
 
+## Re-run files: views, functions, grants
+
+A view, a function or a set of grants is easier to read and change as one
+file than as a chain of migrations. Put it in `src/myapp/rerun/` (any
+lowercase name: `views.sql`, `grants.sql`), written so it can run again:
+`CREATE OR REPLACE VIEW`, `CREATE OR REPLACE FUNCTION`, `GRANT`.
+
+`migrate` runs each re-run file after the migrations when it is new or has
+changed since it last ran, each in its own transaction with the same
+timeouts as a migration, libraries' before the app's, and by name within a
+package. When one builds on another, number them so they sort in that order:
+`10_views.sql` before `90_grants.sql`, so the grants reach the views.
+`status` lists the ones
+due, and `pending()` includes them. `public.schema_reruns` records which
+version of each ran. They follow the migrations' rules: no BEGIN or COMMIT,
+and no `-- pgforward: no-transaction`.
+
+A migration that drops a column a view uses fails until the view's re-run
+file changes in the same commit: drop the view in the migration, and the
+re-run file creates it again.
+
+## Grants
+
+Keep the runtime role's privileges in a re-run file such as
+`src/myapp/rerun/90_grants.sql`, granted
+to a role that exists on every server the app runs on:
+
+    GRANT USAGE ON SCHEMA app TO myapp_runtime;
+    GRANT SELECT, INSERT ON app.pings TO myapp_runtime;
+    GRANT SELECT, INSERT, UPDATE ON app.checks TO myapp_runtime;
+
+Creating the role is a one-time job for whoever administers the server, not
+a migration. After a deploy, check it:
+
+    pgforward grants --role myapp_runtime
+
+lists every table with what the role may do on it, and exits 1 when some
+table has nothing at all (a new table the grants file forgot) or the role
+cannot reach a schema. It only reads.
+
 ## The kind of database
 
 The kind is stored in the database itself (`pgforward mark <kind>`). A
@@ -117,6 +161,21 @@ A file older than ones already applied (a branch merged after your later work
 ran) is applied and reported as out of order, and recorded so in the ledger.
 Its columns land after yours, where a fresh build puts them before: on a
 branch database, `pgforward rebuild` makes the two match.
+
+## Checking a database against the files
+
+    pgforward schema --check
+
+builds every file in a scratch database, dumps both schemas the way
+schema.sql is written, and prints the difference; exit 0 when they match,
+1 when they differ. A late-merged migration's column order shows up here; on
+a branch database `rebuild` fixes it, elsewhere a new migration does.
+
+    pgforward migrate --dry-run
+
+prints, in order, each file `migrate` would run, whether it runs in a
+transaction, the settings it gets, and its SQL. It writes nothing, and it
+refuses whatever `migrate` would refuse.
 
 ## schema.sql
 
@@ -170,7 +229,8 @@ and `prepare` rebuilds by itself. `packages` defaults to pyproject.toml's list; 
 app runs where pyproject.toml is not.
 
 The role the application runs as needs `SELECT` on
-`public.schema_migrations` for these to work.
+`public.schema_migrations`, and on `public.schema_reruns` once there are
+re-run files, for these to work.
 
 ## Production
 

@@ -1,4 +1,3 @@
-import psycopg
 import pytest
 from support import CHECKS, query
 
@@ -137,5 +136,6 @@ def test_a_role_cannot_read_the_reruns_table_either_without_a_grant(
     pgforward.migrate(db, [app.name])
     query(db, f'GRANT SELECT ON public.schema_migrations TO "{role}"')
 
-    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+    with pytest.raises(pgforward.Refused) as refused:
         pgforward.status(as_role(db), [app.name])
+    assert f"GRANT SELECT ON public.schema_reruns TO {role}" in refused.value.fix

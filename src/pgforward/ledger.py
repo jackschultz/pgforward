@@ -156,6 +156,13 @@ def status(
 def read_reruns(conn: psycopg.Connection) -> dict[tuple[str, str], str]:
     if not database.one(conn, queries.RERUNS_EXIST)[0]:
         return {}
+    readable, role = database.one(conn, queries.RERUNS_READABLE)
+    if not readable:
+        raise Refused(
+            f"the role {role} cannot read public.schema_reruns, so which re-run "
+            "files are current cannot be known",
+            f"GRANT SELECT ON public.schema_reruns TO {role}",
+        )
     return {(p, f): c for p, f, c in conn.execute(queries.READ_RERUNS)}
 
 

@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS public.schema_reruns (
 
 READ_RERUNS = "SELECT package, filename, checksum FROM public.schema_reruns"
 
+RERUNS_READABLE = """
+SELECT has_table_privilege('public.schema_reruns', 'SELECT'), current_user
+"""
+
 RECORD_RERUN = """
 INSERT INTO public.schema_reruns (package, filename, checksum)
 VALUES (%s, %s, %s)

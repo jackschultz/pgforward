@@ -1,7 +1,7 @@
 """What the application's runtime role may do, table by table. Read-only.
 
 The runtime role owns nothing and holds only the privileges a re-run file
-(conventionally rerun/grants.sql) gives it. A new table the grants file
+(conventionally rerun/90_grants.sql) gives it. A new table the grants file
 forgot is the common gap, so a table on which the role holds nothing is the
 "no" answer.
 """
