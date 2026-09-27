@@ -16,6 +16,19 @@ In pyproject.toml, name the packages whose migrations run, your app first:
 Migrations live inside each package, in `src/myapp/migrations/`, so an
 installed app finds them. A library does the same in its own package.
 
+schema.sql, `schema --check` and `grants` cover every schema in the database
+except those listed in `exclude_schemas`: schemas another tool creates and
+migrates itself in the same database. pgtrail, for example, keeps its tables
+in schema `pgtrail` and runs its own migrations, so an app that uses both
+lists it:
+
+    [tool.pgforward]
+    packages = ["myapp"]
+    exclude_schemas = ["pgtrail"]   # exact schema names; passed to pg_dump --exclude-schema
+
+Each command that leaves schemas out says so once in its output, and its
+`--json` carries them as `excluded_schemas`.
+
 The database is `--url`, else `MIGRATION_DATABASE_URL`, else `DATABASE_URL`.
 pgforward does not read `.env`; run it as
 
@@ -125,7 +138,8 @@ a migration. After a deploy, check it:
 
 lists every table with what the role may do on it, and exits 1 when some
 table has nothing at all (a new table the grants file forgot) or the role
-cannot reach a schema. It only reads.
+cannot reach a schema. Tables in `exclude_schemas` are not listed. It only
+reads.
 
 ## The kind of database
 
@@ -167,8 +181,8 @@ branch database, `pgforward rebuild` makes the two match.
     pgforward schema --check
 
 builds every file in a scratch database, dumps both schemas the way
-schema.sql is written, and prints the difference; exit 0 when they match,
-1 when they differ. A late-merged migration's column order shows up here; on
+schema.sql is written (leaving out `exclude_schemas`), and prints the
+difference; exit 0 when they match, 1 when they differ. A late-merged migration's column order shows up here; on
 a branch database `rebuild` fixes it, elsewhere a new migration does.
 
     pgforward migrate --dry-run

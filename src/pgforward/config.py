@@ -20,6 +20,9 @@ ENV_FILE_HINT = "uv run --env-file .env pgforward <command>"
 class Project:
     root: pathlib.Path
     packages: tuple[str, ...]
+    # Schemas another tool owns in the same database: left out of schema.sql,
+    # `schema --check` and `grants`.
+    exclude_schemas: tuple[str, ...] = ()
 
     @property
     def schema_file(self) -> pathlib.Path:
@@ -72,7 +75,16 @@ def project(start: pathlib.Path | None = None) -> Project:
                 "names, the app's own first",
                 'packages = ["myapp"]',
             )
-        return Project(folder, tuple(packages))
+        excluded = settings.get("exclude_schemas", [])
+        if not isinstance(excluded, list) or not all(
+            isinstance(s, str) and s for s in excluded
+        ):
+            raise ConfigError(
+                f"{path}: [tool.pgforward] exclude_schemas must be a list of "
+                "schema names that another tool owns in this database",
+                'exclude_schemas = ["pgtrail"]',
+            )
+        return Project(folder, tuple(packages), tuple(excluded))
     raise ConfigError(
         f"no pyproject.toml with [tool.pgforward] at or above {here}",
         'add to pyproject.toml:\n\n    [tool.pgforward]\n    packages = ["myapp"]'

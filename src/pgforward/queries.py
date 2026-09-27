@@ -128,8 +128,9 @@ WHERE NOT i.indisvalid
 ORDER BY 1
 """
 
-# The application's tables: every table outside the system schemas except
-# pgforward's own two, with what a role may do on each.
+# The application's tables: every table outside the system schemas and the
+# schemas exclude_schemas names, except pgforward's own two, with what a role
+# may do on each.
 TABLE_PRIVILEGES = """
 SELECT format('%%I.%%I', n.nspname, c.relname),
        has_table_privilege(%s, c.oid, 'SELECT'),
@@ -141,6 +142,7 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p', 'v', 'm')
   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
   AND n.nspname NOT LIKE 'pg\\_%%'
+  AND n.nspname::text <> ALL (%s::text[])
   AND (n.nspname, c.relname) NOT IN
       (('public', 'schema_migrations'), ('public', 'schema_reruns'))
 ORDER BY 1
@@ -153,6 +155,7 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p', 'v', 'm')
   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
   AND n.nspname NOT LIKE 'pg\\_%%'
+  AND n.nspname::text <> ALL (%s::text[])
   AND NOT has_schema_privilege(%s, n.oid, 'USAGE')
 ORDER BY 1
 """
