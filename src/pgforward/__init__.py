@@ -11,6 +11,9 @@
     pgforward.check_schema(url)       differences from a fresh build
 
 `packages` defaults to [tool.pgforward] packages in the nearest pyproject.toml.
+`exclude_schemas` (schemas another tool owns in the same database, left out of
+schema.sql, check_schema and grants) is passed in; only the command reads
+[tool.pgforward] exclude_schemas.
 """
 
 import dataclasses
@@ -75,6 +78,7 @@ def migrate(
     *,
     schema_file: pathlib.Path | None = None,
     echo: Echo | None = None,
+    exclude_schemas: Sequence[str] = (),
 ) -> Result:
     """Apply what is pending. On a branch database, when anything was applied
     and `schema_file` is given, rewrite it from a fresh build."""
@@ -82,7 +86,7 @@ def migrate(
     result = apply.migrate(url, names, echo=echo)
     if result.applied and schema_file is not None and result.target.kind == "branch":
         try:
-            schema.write(url, names, schema_file, echo)
+            schema.write(url, names, schema_file, echo, exclude_schemas)
         except SchemaDumpFailed as problem:
             raise SchemaDumpFailed(
                 f"{len(result.applied)} applied, but schema.sql was not written: "
@@ -99,6 +103,7 @@ def rebuild(
     *,
     schema_file: pathlib.Path | None = None,
     echo: Echo | None = None,
+    exclude_schemas: Sequence[str] = (),
 ) -> Result:
     """Drop a test or branch database, create it empty, and apply every file."""
     names = _packages(packages)
@@ -121,7 +126,13 @@ def rebuild(
             say(line)
         named = True
 
-    return migrate(url, names, schema_file=schema_file, echo=without_the_name_again)
+    return migrate(
+        url,
+        names,
+        schema_file=schema_file,
+        echo=without_the_name_again,
+        exclude_schemas=exclude_schemas,
+    )
 
 
 def status(url: str, packages: Sequence[str] | None = None) -> Status:
@@ -149,17 +160,23 @@ def plan(url: str, packages: Sequence[str] | None = None) -> Plan:
     return apply.plan(url, _packages(packages))
 
 
-def grants(url: str, role: str) -> grants_check.Grants:
-    """What `role` may do on each of the application's tables. Read-only."""
-    return grants_check.check(url, role)
+def grants(
+    url: str, role: str, exclude_schemas: Sequence[str] = ()
+) -> grants_check.Grants:
+    """What `role` may do on each of the application's tables, outside
+    `exclude_schemas`. Read-only."""
+    return grants_check.check(url, role, exclude_schemas)
 
 
 def check_schema(
-    url: str, packages: Sequence[str] | None = None, echo: Echo | None = None
+    url: str,
+    packages: Sequence[str] | None = None,
+    echo: Echo | None = None,
+    exclude_schemas: Sequence[str] = (),
 ) -> tuple[Target, list[str]]:
     """How this database's schema differs from a fresh build of every file, as
     unified diff lines; empty when they match."""
-    return schema.check(url, _packages(packages), echo)
+    return schema.check(url, _packages(packages), echo, exclude_schemas)
 
 
 def mark(url: str, kind: Kind) -> tuple[Target, Target]:
@@ -172,10 +189,11 @@ def write_schema(
     path: pathlib.Path,
     packages: Sequence[str] | None = None,
     echo: Echo | None = None,
+    exclude_schemas: Sequence[str] = (),
 ) -> Target:
     """Write the schema a fresh build of every file produces, built in a
     scratch database on `url`'s server; returns that server's database."""
-    return schema.write(url, _packages(packages), path, echo)
+    return schema.write(url, _packages(packages), path, echo, exclude_schemas)
 
 
 def _packages(packages: Sequence[str] | None) -> tuple[str, ...]:

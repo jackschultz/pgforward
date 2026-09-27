@@ -40,9 +40,10 @@ def write(
     packages: Sequence[str],
     path: pathlib.Path,
     echo: Callable[[str], None] | None = None,
+    exclude_schemas: Sequence[str] = (),
 ) -> database.Target:
     pg_dump, target = _pg_dump(url)
-    fresh, name = _fresh(url, packages, pg_dump)
+    fresh, name = _fresh(url, packages, pg_dump, exclude_schemas)
     path.write_text(fresh)
     if echo:
         echo(
@@ -53,25 +54,31 @@ def write(
 
 
 def check(
-    url: str, packages: Sequence[str], echo: Callable[[str], None] | None = None
+    url: str,
+    packages: Sequence[str],
+    echo: Callable[[str], None] | None = None,
+    exclude_schemas: Sequence[str] = (),
 ) -> tuple[database.Target, list[str]]:
     """How this database's schema differs from a fresh build of every file:
-    unified diff lines, empty when they match."""
+    unified diff lines, empty when they match. Schemas in `exclude_schemas`
+    are left out of both dumps."""
     pg_dump, target = _pg_dump(url)
-    fresh, name = _fresh(url, packages, pg_dump)
+    fresh, name = _fresh(url, packages, pg_dump, exclude_schemas)
     if echo:
         echo(
             f"scratch  built every file in {name}, a database created on this "
             "server for it and dropped again"
         )
-    here = _dump(pg_dump, url)
+    here = _dump(pg_dump, url, exclude_schemas)
     diff = difflib.unified_diff(
         fresh.splitlines(), here.splitlines(), "fresh build", target.name, lineterm=""
     )
     return target, list(diff)
 
 
-def _fresh(url: str, packages: Sequence[str], pg_dump: str) -> tuple[str, str]:
+def _fresh(
+    url: str, packages: Sequence[str], pg_dump: str, exclude_schemas: Sequence[str]
+) -> tuple[str, str]:
     with database.scratch(url) as scratch:
         name = str(conninfo_to_dict(scratch)["dbname"])
         try:
@@ -84,10 +91,16 @@ def _fresh(url: str, packages: Sequence[str], pg_dump: str) -> tuple[str, str]:
                 f"on a branch database, `pgforward rebuild` shows it here. "
                 f"{problem.fix}",
             ) from None
-        return _dump(pg_dump, scratch), name
+        return _dump(pg_dump, scratch, exclude_schemas), name
 
 
-def _dump(pg_dump: str, url: str) -> str:
+def _dump(pg_dump: str, url: str, exclude_schemas: Sequence[str]) -> str:
+    # Each name double-quoted, so pg_dump reads it as that exact schema name
+    # rather than a pattern, as `grants` does.
+    excluded = [
+        '--exclude-schema="{}"'.format(name.replace('"', '""'))
+        for name in exclude_schemas
+    ]
     dumped = subprocess.run(
         [
             pg_dump,
@@ -96,6 +109,7 @@ def _dump(pg_dump: str, url: str) -> str:
             "--no-privileges",
             "--exclude-table=public.schema_migrations",
             "--exclude-table=public.schema_reruns",
+            *excluded,
             "--dbname",
             url,
         ],

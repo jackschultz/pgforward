@@ -201,6 +201,7 @@ def _migrate(args: argparse.Namespace) -> int:
         project.packages,
         schema_file=project.schema_file,
         echo=None if args.json else print,
+        exclude_schemas=project.exclude_schemas,
     )
     return _applied(args, "migrate", result, project)
 
@@ -236,7 +237,10 @@ def _dry_run(args: argparse.Namespace, project: config.Project) -> int:
 
 
 def _grants(args: argparse.Namespace) -> int:
-    found = pgforward.grants(config.database_url(args.url), args.role)
+    project = config.project()
+    found = pgforward.grants(
+        config.database_url(args.url), args.role, project.exclude_schemas
+    )
     if args.json:
         _print_json(
             {
@@ -246,10 +250,12 @@ def _grants(args: argparse.Namespace) -> int:
                 "complete": found.complete,
                 "tables": [vars(t) for t in found.tables],
                 "schemas_without_usage": found.schemas_without_usage,
+                "excluded_schemas": list(found.excluded_schemas),
             }
         )
         return 0 if found.complete else 1
     print(found.target.describe())
+    _say_excluded(project)
     for schema_name in found.schemas_without_usage:
         print(f"no usage {schema_name}  {found.role} cannot reach its tables at all")
     for table in found.tables:
@@ -273,6 +279,7 @@ def _rebuild(args: argparse.Namespace) -> int:
         project.packages,
         schema_file=project.schema_file,
         echo=None if args.json else print,
+        exclude_schemas=project.exclude_schemas,
     )
     return _applied(args, "rebuild", result, project)
 
@@ -291,10 +298,12 @@ def _applied(
                 "applied": [vars(r) for r in result.applied],
                 "reruns": [vars(r) for r in result.reruns],
                 "schema_file": str(result.schema_file) if result.schema_file else None,
+                "excluded_schemas": list(project.exclude_schemas),
             }
         )
         return 0
     if result.schema_file:
+        _say_excluded(project)
         print(f"wrote    {_relative(result.schema_file)}")
     reran = f", {len(result.reruns)} re-run" if result.reruns else ""
     print(f"done     {len(result.applied)} applied{reran}; the database is current")
@@ -333,7 +342,10 @@ def _schema(args: argparse.Namespace) -> int:
     lines: list[str] = []
     if args.check:
         target, diff = pgforward.check_schema(
-            config.database_url(args.url), project.packages, echo=lines.append
+            config.database_url(args.url),
+            project.packages,
+            echo=lines.append,
+            exclude_schemas=project.exclude_schemas,
         )
         if args.json:
             _print_json(
@@ -342,12 +354,14 @@ def _schema(args: argparse.Namespace) -> int:
                     "database": target.as_json(),
                     "matches": not diff,
                     "diff": diff,
+                    "excluded_schemas": list(project.exclude_schemas),
                 }
             )
             return 1 if diff else 0
         print(target.describe())
         for line in lines:
             print(line)
+        _say_excluded(project)
         if not diff:
             print("done     the schema matches a fresh build of every file")
             return 0
@@ -363,6 +377,7 @@ def _schema(args: argparse.Namespace) -> int:
         project.schema_file,
         project.packages,
         echo=lines.append,
+        exclude_schemas=project.exclude_schemas,
     )
     if args.json:
         _print_json(
@@ -370,12 +385,14 @@ def _schema(args: argparse.Namespace) -> int:
                 "command": "schema",
                 "database": target.as_json(),
                 "schema_file": str(project.schema_file),
+                "excluded_schemas": list(project.exclude_schemas),
             }
         )
     else:
         print(target.describe())
         for line in lines:
             print(line)
+        _say_excluded(project)
         print(f"wrote    {_relative(project.schema_file)}")
     return 0
 
@@ -400,6 +417,14 @@ def _error(args: argparse.Namespace, code: str, message: str, fix: str) -> int:
         if fix:
             print(f"fix: {fix}", file=sys.stderr)
     return 2
+
+
+def _say_excluded(project: config.Project) -> None:
+    if project.exclude_schemas:
+        print(
+            f"note     leaves out schemas {', '.join(project.exclude_schemas)}, "
+            "as exclude_schemas says"
+        )
 
 
 def _print_json(body: dict[str, Any]) -> None:
